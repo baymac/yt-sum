@@ -8,6 +8,25 @@
 	const SUMMARY_MODAL_ID = "yt-sum-summary-modal";
 	const LOADING_CLASS = "yt-sum-loading";
 
+	// Helpers
+	function storageGet(keys) {
+		return new Promise((resolve) => {
+			try {
+				// Use callback form for broad compatibility across Chrome versions
+				chrome.storage.sync.get(keys, (result) => {
+					resolve(result || {});
+				});
+			} catch (_) {
+				// Fallback if Promises are supported
+				try {
+					resolve(chrome.storage.sync.get(keys));
+				} catch (e) {
+					resolve({});
+				}
+			}
+		});
+	}
+
 	// Initialize when page loads
 	function init() {
 		// Wait for YouTube to fully load
@@ -257,7 +276,7 @@
 
 		try {
 			// Get API key from storage
-			const result = await chrome.storage.sync.get(["geminiApiKey"]);
+			const result = await storageGet(["geminiApiKey"]);
 			const apiKey = result.geminiApiKey;
 
 			if (!apiKey) {
@@ -414,7 +433,7 @@
 		}
 
 		// Check dark mode preference
-		const result = await chrome.storage.sync.get(["darkMode"]);
+		const result = await storageGet(["darkMode"]);
 		const isDarkMode = result.darkMode || false;
 
 		// Store current scroll position
@@ -477,7 +496,7 @@
 		if (!modal) return;
 
 		// Check if dark mode is enabled (preserve it)
-		const result = await chrome.storage.sync.get(["darkMode"]);
+		const result = await storageGet(["darkMode"]);
 		const isDarkMode = result.darkMode || false;
 
 		// Ensure dark mode class is applied if needed
@@ -515,7 +534,7 @@
 		}
 
 		// Check dark mode preference
-		const result = await chrome.storage.sync.get(["darkMode"]);
+		const result = await storageGet(["darkMode"]);
 		const isDarkMode = result.darkMode || false;
 
 		// Store current scroll position

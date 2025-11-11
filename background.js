@@ -1,5 +1,51 @@
 // Background service worker for handling API calls
 
+// Ensure the side panel uses our settings UI
+async function setupSidePanel() {
+	try {
+		if (chrome?.sidePanel?.setOptions) {
+			await chrome.sidePanel.setOptions({
+				path: "popup.html",
+				enabled: true,
+			});
+		}
+		// Let Chrome open the side panel on action click automatically
+		if (chrome?.sidePanel?.setPanelBehavior) {
+			await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+		}
+	} catch (err) {
+		console.error("Error setting up side panel:", err);
+	}
+}
+
+// Set up side panel on install and startup
+chrome.runtime.onInstalled.addListener(() => {
+	setupSidePanel();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+	setupSidePanel();
+});
+
+// Optional: ensure per-tab options are set when icon is clicked (opening is handled by Chrome)
+chrome.action.onClicked.addListener((tab) => {
+	try {
+		if (chrome?.sidePanel?.setOptions) {
+			chrome.sidePanel
+				.setOptions({
+					tabId: tab.id,
+					path: "popup.html",
+					enabled: true,
+				})
+				.catch((err) => {
+					console.error("Error setting side panel options for tab:", err);
+				});
+		}
+	} catch (e) {
+		console.error("Unexpected error in action.onClicked:", e);
+	}
+});
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 	if (request.action === "summarize") {
 		handleSummarize(request, sendResponse);
