@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Video Summarizer",
-  "version": "1.0.0",
-  "description": "Get AI-powered summaries of YouTube videos using Gemini API",
+  "version": "2.0.0",
+  "description": "Summarize YouTube videos from their full transcript using Gemini, with a native video-understanding fallback. Modal on the home feed, summary in the side panel while watching.",
   "permissions": [
     "storage",
     "activeTab",
