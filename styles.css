@@ -145,7 +145,7 @@
 
 .yt-sum-modal-header h3 {
   margin: 0;
-  font-size: 24px;
+  font-size: 18px;
   font-weight: 600;
   color: #333;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
@@ -188,11 +188,11 @@
   overflow-y: auto;
   overflow-x: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  line-height: 1.8;
+  line-height: 1.7;
   color: #333;
   flex: 1;
   min-height: 0;
-  font-size: 18px;
+  font-size: 15px;
 }
 
 .yt-sum-modal-body h1,
@@ -208,21 +208,21 @@
 }
 
 .yt-sum-modal-body h1 {
-  font-size: 28px;
+  font-size: 20px;
   border-bottom: 2px solid #e0e0e0;
   padding-bottom: 8px;
 }
 
 .yt-sum-modal-body h2 {
-  font-size: 24px;
+  font-size: 17px;
 }
 
 .yt-sum-modal-body h3 {
-  font-size: 20px;
+  font-size: 15px;
 }
 
 .yt-sum-modal-body h4 {
-  font-size: 18px;
+  font-size: 14px;
 }
 
 .yt-sum-modal-body h1:first-child,
@@ -232,15 +232,13 @@
 }
 
 .yt-sum-modal-body p {
-  margin: 16px 0;
-  font-size: 18px;
+  margin: 12px 0;
 }
 
 .yt-sum-modal-body ul,
 .yt-sum-modal-body ol {
-  margin: 16px 0;
-  padding-left: 32px;
-  font-size: 18px;
+  margin: 12px 0;
+  padding-left: 28px;
 }
 
 .yt-sum-modal-body li {
@@ -264,17 +262,17 @@
   padding: 2px 6px;
   border-radius: 4px;
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 16px;
+  font-size: 13px;
 }
 
 .yt-sum-modal-body pre {
   background-color: #f5f5f5;
-  padding: 16px;
+  padding: 14px;
   border-radius: 8px;
   overflow-x: auto;
-  margin: 16px 0;
+  margin: 12px 0;
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 16px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -428,6 +426,24 @@
 
 .yt-sum-error-modal .yt-sum-modal-content {
   border: 2px solid #c62828;
+}
+
+/* Streaming cursor shown while summary is being generated. */
+.yt-sum-cursor {
+  display: inline-block;
+  color: #667eea;
+  animation: yt-sum-cursor-blink 1s step-end infinite;
+}
+
+@keyframes yt-sum-cursor-blink {
+  50% { opacity: 0; }
+}
+
+/* Compact button for sidebar video list (watch page right rail). */
+.yt-sum-compact-btn {
+  padding: 3px 8px !important;
+  font-size: 11px !important;
+  margin: 4px 0 2px !important;
 }
 
 /* Prevent body scrolling when modal is open */

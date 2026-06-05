@@ -1,7 +1,7 @@
 (() => {
   // src/lib/summarize.js
   var GEMINI_MODEL = "gemini-2.5-flash";
-  var ENDPOINT = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+  var STREAM_ENDPOINT = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
   var MAX_TRANSCRIPT_CHARS = 2e5;
   var SUMMARY_INSTRUCTION = `You are summarizing a YouTube video so the reader does NOT have to watch it. Produce a clear, well-structured Markdown summary with these sections:
 
@@ -34,6 +34,7 @@ Write in plain, direct language. Do not invent content that isn't supported by t
 ${head}TRANSCRIPT:
 ${clampTranscript(transcript)}`;
   }
+  var GENERATION_CONFIG = { temperature: 0.3, maxOutputTokens: 8192 };
   function buildRequestBody({ mode, title, transcript, videoUrl }) {
     if (mode === "video") {
       const ask = title ? `${SUMMARY_INSTRUCTION}
@@ -46,7 +47,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
             parts: [{ text: ask }, { file_data: { file_uri: videoUrl } }]
           }
         ],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+        generationConfig: GENERATION_CONFIG
       };
     }
     return {
@@ -56,25 +57,16 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
           parts: [{ text: buildTranscriptPrompt({ title, transcript }) }]
         }
       ],
-      generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+      generationConfig: GENERATION_CONFIG
     };
-  }
-  function parseGeminiResponse(data) {
-    const parts = data?.candidates?.[0]?.content?.parts;
-    if (Array.isArray(parts)) {
-      const text = parts.map((p) => p.text || "").join("").trim();
-      if (text) return text;
-    }
-    const block = data?.promptFeedback?.blockReason;
-    if (block) return null;
-    return null;
   }
   var isTransient = (status) => status === 429 || status >= 500;
   var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  async function callGemini({
+  async function callGeminiStreaming({
     apiKey,
     model = GEMINI_MODEL,
     body,
+    onChunk,
     fetchImpl,
     sleepImpl = sleep,
     maxAttempts = 3
@@ -85,7 +77,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1e3);
       let res;
       try {
-        res = await f(ENDPOINT(model), {
+        res = await f(STREAM_ENDPOINT(model), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -97,44 +89,44 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         lastError = `Network error: ${e?.message || e}`;
         continue;
       }
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        const text = parseGeminiResponse(data);
-        if (text) return { ok: true, text };
-        return {
-          ok: false,
-          error: "Gemini returned no summary (the response may have been blocked or empty)."
-        };
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const message = errData?.error?.message || res.statusText || "API error";
+        if (res.status === 400 && /API key not valid|API_KEY_INVALID/i.test(message)) {
+          throw new Error("Your Gemini API key is invalid. Update it in the side panel settings.");
+        }
+        if (!isTransient(res.status)) throw new Error(message);
+        lastError = message;
+        continue;
       }
-      const errData = await res.json().catch(() => ({}));
-      const message = errData?.error?.message || res.statusText || "API error";
-      if (res.status === 400 && /API key not valid|API_KEY_INVALID/i.test(message)) {
-        return { ok: false, error: "Your Gemini API key is invalid. Update it in the side panel settings." };
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const json = JSON.parse(data);
+            const text = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            if (text) {
+              accumulated += text;
+              onChunk?.(accumulated);
+            }
+          } catch (_) {
+          }
+        }
       }
-      if (!isTransient(res.status)) {
-        return { ok: false, error: message };
-      }
-      lastError = message;
+      return accumulated;
     }
-    return { ok: false, error: `Gemini is busy right now. ${lastError}` };
-  }
-  async function summarize({
-    apiKey,
-    videoUrl,
-    title,
-    transcript,
-    model = GEMINI_MODEL,
-    fetchImpl,
-    sleepImpl
-  }) {
-    if (!apiKey) {
-      return { ok: false, error: "Set your Gemini API key in the side panel first." };
-    }
-    const mode = transcript && transcript.trim() ? "transcript" : "video";
-    const body = buildRequestBody({ mode, title, transcript, videoUrl });
-    const result = await callGemini({ apiKey, model, body, fetchImpl, sleepImpl });
-    if (result.ok) return { ok: true, text: result.text, mode };
-    return result;
+    throw new Error(`Gemini is busy right now. ${lastError}`);
   }
 
   // src/lib/storage.js
@@ -160,7 +152,8 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     SUMMARY_READY: "SUMMARY_READY",
     SUMMARY_STATE_REQUEST: "SUMMARY_STATE_REQUEST",
     OPEN_SIDE_PANEL: "OPEN_SIDE_PANEL",
-    SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR"
+    SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR",
+    SUMMARY_PROGRESS: "SUMMARY_PROGRESS"
   };
   var SESSION_KEY = "currentSummary";
 
@@ -196,10 +189,12 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       return null;
     }
   }
+  var YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (sender.id !== chrome.runtime.id) return false;
     switch (message?.type) {
       case MSG.GENERATE_SUMMARY:
-        handleGenerate(message, sendResponse);
+        handleGenerate(message, sender, sendResponse);
         return true;
       // async response
       case MSG.PUBLISH_SUMMARY:
@@ -218,16 +213,53 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         return false;
     }
   });
-  async function handleGenerate(message, sendResponse) {
+  async function handleGenerate(message, sender, sendResponse) {
     try {
+      if (message.videoUrl && !YOUTUBE_DOMAIN_RE.test(message.videoUrl)) {
+        sendResponse({ ok: false, error: "Invalid video URL." });
+        return;
+      }
       const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-      const result = await summarize({
-        apiKey: geminiApiKey,
-        videoUrl: message.videoUrl,
+      if (!geminiApiKey) {
+        sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+        return;
+      }
+      const mode = message.transcript?.trim() ? "transcript" : "video";
+      const body = buildRequestBody({
+        mode,
         title: message.title,
-        transcript: message.transcript
+        transcript: message.transcript,
+        videoUrl: message.videoUrl
       });
-      sendResponse(result);
+      const tabId = sender?.tab?.id;
+      const { target, token } = message;
+      let finalText = "";
+      try {
+        finalText = await callGeminiStreaming({
+          apiKey: geminiApiKey,
+          model: GEMINI_MODEL,
+          body,
+          onChunk: (accumulated) => {
+            if (tabId != null) {
+              chrome.tabs.sendMessage(
+                tabId,
+                { type: MSG.SUMMARY_PROGRESS, text: accumulated, mode, target, token },
+                () => {
+                  void chrome.runtime?.lastError;
+                }
+              );
+            }
+          }
+        });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || "Failed to summarize." });
+        return;
+      }
+      if (!finalText) {
+        sendResponse({ ok: false, error: "Gemini returned no summary (response may have been blocked)." });
+        return;
+      }
+      sendResponse({ ok: true, text: finalText, mode });
     } catch (e) {
       sendResponse({ ok: false, error: e?.message || "Unexpected error generating summary." });
     }
