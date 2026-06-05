@@ -1,5 +1,13 @@
 # Security Documentation - XSS Prevention
 
+> v2 note: code line references below are historical. The escaping logic now lives in
+> `src/lib/markdown.js` (`escapeHtml`, `formatSummary`). Two items previously flagged as
+> "could be enhanced" are now **implemented**:
+> - **Link URL sanitization** — `sanitizeUrl()` blocks `javascript:`/`data:`/`vbscript:`
+>   and relative/protocol-relative URLs, allowing only `http(s)`. Covered by tests.
+> - **API key isolation** — the Gemini key is read only in the background service worker
+>   (`src/background.js`); it is never passed into page or content-script context.
+
 ## How XSS is Prevented
 
 ### 1. HTML Escaping Function
