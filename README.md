@@ -115,6 +115,11 @@ It keeps the library in an isolated venv (so it works on PEP-668 "externally man
 Python) and handles both the library's old and new APIs. `scripts/yt-transcript.py` is the
 standalone extractor it uses.
 
+## Docs
+
+- [Architecture & API reference](docs/DOCUMENTATION.md) — component diagram, message protocol, module responsibilities
+- [Security model](docs/SECURITY.md) — XSS prevention, sanitizeUrl(), sender validation, API key isolation
+
 ## Privacy & security
 
 - The API key is stored in Chrome sync storage and used only by the background service
