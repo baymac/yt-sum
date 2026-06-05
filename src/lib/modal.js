@@ -91,6 +91,17 @@ function setBody(html, token) {
 	if (body) body.innerHTML = html;
 }
 
+/** Update the modal body with partial streaming text (no source note yet, cursor shown). */
+export function showStreamingText(text, token) {
+	if (token != null && token !== activeToken) return;
+	const modal = document.getElementById(MODAL_ID);
+	if (!modal) return;
+	const body = modal.querySelector(".yt-sum-modal-body");
+	if (!body) return;
+	body.innerHTML =
+		formatSummary(text) + '<span class="yt-sum-cursor" aria-hidden="true">▋</span>';
+}
+
 /** Render the finished summary (markdown → safe HTML), with a source note. */
 export function showSummary(text, { mode, token } = {}) {
 	const note =

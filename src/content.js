@@ -15,7 +15,7 @@ import {
 	getWatchVideoId,
 	insertButton,
 } from "./lib/youtube-dom.js";
-import { openLoadingModal, showError, showSummary } from "./lib/modal.js";
+import { openLoadingModal, showError, showSummary, showStreamingText } from "./lib/modal.js";
 import { storageGet } from "./lib/storage.js";
 import { MSG } from "./lib/messages.js";
 
@@ -75,6 +75,8 @@ async function summarizeVideo({ videoId, title, target }) {
 		videoUrl,
 		title: resolvedTitle,
 		transcript,
+		target: sidebar ? "sidebar" : "modal",
+		token: modalToken,
 	});
 
 	emit(
@@ -154,6 +156,7 @@ async function withButtonLoading(button, fn) {
 function addFeedButtons() {
 	let added = 0;
 	for (const selector of VIDEO_CONTAINER_SELECTORS) {
+		const isCompact = selector === "ytd-compact-video-renderer";
 		for (const container of document.querySelectorAll(selector)) {
 			if (container.querySelector(`.${BTN_CLASS}`)) continue;
 			const videoLink = container.querySelector('a[href*="/watch?v="]');
@@ -163,13 +166,14 @@ function addFeedButtons() {
 			const title = getVideoTitle(container, videoLink) || "Untitled Video";
 
 			const button = makeButton({
-				label: "📝 Summarize",
+				label: isCompact ? "📝 Summarize" : "📝 Summarize",
 				title: "Get an AI summary of this video",
 				onClick: (btn) =>
 					withButtonLoading(btn, () =>
 						summarizeVideo({ videoId, title, target: "modal" }),
 					),
 			});
+			if (isCompact) button.classList.add("yt-sum-compact-btn");
 			if (insertButton(container, button)) added++;
 		}
 	}
@@ -258,6 +262,7 @@ function init() {
 	}, 1000);
 
 	// Panel-initiated summarize ("Summarize current video" button in the side panel).
+	// Also handles streaming progress from the background service worker.
 	// Fire-and-forget: no response is expected, so return false (not true).
 	chrome.runtime.onMessage.addListener((message) => {
 		if (message?.type === MSG.SUMMARIZE_IN_SIDEBAR) {
@@ -265,6 +270,12 @@ function init() {
 			if (videoId) {
 				const title = document.title.replace(/\s*-\s*YouTube\s*$/, "").trim();
 				summarizeVideo({ videoId, title, target: "sidebar" });
+			}
+		} else if (message?.type === MSG.SUMMARY_PROGRESS) {
+			if (message.target === "modal") {
+				showStreamingText(message.text, message.token);
+			} else if (message.target === "sidebar") {
+				publish({ status: "streaming", text: message.text });
 			}
 		}
 		return false;

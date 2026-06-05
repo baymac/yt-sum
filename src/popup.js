@@ -118,8 +118,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 		if (state.status === "loading") {
 			els.summaryStatus.className = "summary-status";
 			els.summaryStatus.innerHTML =
-				'<span class="loader"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span> Reading the transcript and summarizing…';
+				'<span class="loader"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span> Reading the transcript…';
 			els.summaryBody.innerHTML = "";
+			els.summarizeBtn.disabled = true;
+		} else if (state.status === "streaming") {
+			els.summaryStatus.className = "summary-status";
+			els.summaryStatus.innerHTML =
+				'<span class="loader"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
+			els.summaryBody.innerHTML = formatSummary(state.text || "");
 			els.summarizeBtn.disabled = true;
 		} else if (state.status === "error") {
 			els.summaryStatus.className = "summary-status error";

@@ -22,15 +22,26 @@ async function loadBackground(initial = { geminiApiKey: "k" }) {
 	return { chrome, invoke, flush };
 }
 
-const geminiOk = (text) => ({
-	ok: true,
-	status: 200,
-	json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }),
-});
+// Mock a streaming SSE response for callGeminiStreaming.
+const sseOk = (text) => {
+	const chunk = new TextEncoder().encode(
+		`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] })}\n\n`,
+	);
+	return {
+		ok: true,
+		status: 200,
+		body: new ReadableStream({
+			start(controller) {
+				controller.enqueue(chunk);
+				controller.close();
+			},
+		}),
+	};
+};
 
 describe("background message hub", () => {
 	beforeEach(() => {
-		globalThis.fetch = vi.fn(async () => geminiOk("SUMMARY"));
+		globalThis.fetch = vi.fn(async () => sseOk("SUMMARY"));
 	});
 
 	it("GENERATE_SUMMARY calls Gemini and responds with the summary", async () => {

@@ -1,7 +1,7 @@
 // Background service worker. Holds the Gemini API key and is the hub for the
 // side-panel pub/sub. The key never leaves this context.
 
-import { summarize } from "./lib/summarize.js";
+import { callGeminiStreaming, buildRequestBody, GEMINI_MODEL } from "./lib/summarize.js";
 import { storageGet } from "./lib/storage.js";
 import { MSG, SESSION_KEY } from "./lib/messages.js";
 
@@ -58,7 +58,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 	switch (message?.type) {
 		case MSG.GENERATE_SUMMARY:
-			handleGenerate(message, sendResponse);
+			handleGenerate(message, sender, sendResponse);
 			return true; // async response
 
 		case MSG.PUBLISH_SUMMARY:
@@ -79,7 +79,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 	}
 });
 
-async function handleGenerate(message, sendResponse) {
+async function handleGenerate(message, sender, sendResponse) {
 	try {
 		// Validate videoUrl to prevent the Gemini key from being used to process
 		// arbitrary URLs (only YouTube domains are valid file_data sources).
@@ -88,13 +88,48 @@ async function handleGenerate(message, sendResponse) {
 			return;
 		}
 		const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-		const result = await summarize({
-			apiKey: geminiApiKey,
-			videoUrl: message.videoUrl,
+		if (!geminiApiKey) {
+			sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+			return;
+		}
+
+		const mode = message.transcript?.trim() ? "transcript" : "video";
+		const body = buildRequestBody({
+			mode,
 			title: message.title,
 			transcript: message.transcript,
+			videoUrl: message.videoUrl,
 		});
-		sendResponse(result);
+
+		const tabId = sender?.tab?.id;
+		const { target, token } = message;
+
+		let finalText = "";
+		try {
+			finalText = await callGeminiStreaming({
+				apiKey: geminiApiKey,
+				model: GEMINI_MODEL,
+				body,
+				onChunk: (accumulated) => {
+					if (tabId != null) {
+						chrome.tabs.sendMessage(
+							tabId,
+							{ type: MSG.SUMMARY_PROGRESS, text: accumulated, mode, target, token },
+							() => { void chrome.runtime?.lastError; },
+						);
+					}
+				},
+			});
+		} catch (e) {
+			sendResponse({ ok: false, error: e?.message || "Failed to summarize." });
+			return;
+		}
+
+		if (!finalText) {
+			sendResponse({ ok: false, error: "Gemini returned no summary (response may have been blocked)." });
+			return;
+		}
+		sendResponse({ ok: true, text: finalText, mode });
 	} catch (e) {
 		sendResponse({ ok: false, error: e?.message || "Unexpected error generating summary." });
 	}

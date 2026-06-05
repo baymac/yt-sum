@@ -97,11 +97,13 @@ describe("findInsertionPoint / insertButton", () => {
 		expect(insertButton(c, btn)).toBe(true);
 		expect(c.contains(btn)).toBe(true);
 	});
-	it("inserts before the first child of #details when no metadata line exists", () => {
+	it("inserts inside #details (not fallback container) when no metadata line exists", () => {
 		const c = container('<div id="details"><span id="first-child"></span></div>');
 		const btn = document.createElement("button");
 		expect(insertButton(c, btn)).toBe(true);
 		const details = c.querySelector("#details");
-		expect(details.firstElementChild).toBe(btn);
+		// Button must be a child of #details, not the outer container
+		expect(details.contains(btn)).toBe(true);
+		expect(btn.parentElement?.id).toBe("details");
 	});
 });

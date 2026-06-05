@@ -14,6 +14,7 @@ export const MSG = {
 	SUMMARY_STATE_REQUEST: "SUMMARY_STATE_REQUEST",
 	OPEN_SIDE_PANEL: "OPEN_SIDE_PANEL",
 	SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR",
+	SUMMARY_PROGRESS: "SUMMARY_PROGRESS",
 };
 
 // chrome.storage.session key holding the latest sidebar summary state:

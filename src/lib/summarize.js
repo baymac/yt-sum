@@ -11,6 +11,8 @@
 export const GEMINI_MODEL = "gemini-2.5-flash";
 const ENDPOINT = (model) =>
 	`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+const STREAM_ENDPOINT = (model) =>
+	`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
 
 // Keep a long transcript comfortably under the free-tier 250K TPM ceiling while
 // still covering multi-hour videos (~200K chars ≈ 50K tokens).
@@ -45,7 +47,7 @@ export function buildTranscriptPrompt({ title, transcript }) {
 	return `${SUMMARY_INSTRUCTION}\n\n${head}TRANSCRIPT:\n${clampTranscript(transcript)}`;
 }
 
-const GENERATION_CONFIG = { temperature: 0.3, maxOutputTokens: 2048 };
+const GENERATION_CONFIG = { temperature: 0.3, maxOutputTokens: 8192 };
 
 /** Build the generateContent request body for either mode. */
 export function buildRequestBody({ mode, title, transcript, videoUrl }) {
@@ -150,6 +152,85 @@ export async function callGemini({
 	}
 
 	return { ok: false, error: `Gemini is busy right now. ${lastError}` };
+}
+
+/**
+ * Streaming variant: calls streamGenerateContent?alt=sse and invokes onChunk
+ * with the accumulated text after each SSE event. Returns the final full text.
+ * Throws on non-retried errors; retries on transient (429/5xx) up to maxAttempts.
+ */
+export async function callGeminiStreaming({
+	apiKey,
+	model = GEMINI_MODEL,
+	body,
+	onChunk,
+	fetchImpl,
+	sleepImpl = sleep,
+	maxAttempts = 3,
+}) {
+	const f = fetchImpl || globalThis.fetch;
+	let lastError = "Request failed.";
+
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1000);
+
+		let res;
+		try {
+			res = await f(STREAM_ENDPOINT(model), {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"x-goog-api-key": apiKey,
+				},
+				body: JSON.stringify(body),
+			});
+		} catch (e) {
+			lastError = `Network error: ${e?.message || e}`;
+			continue;
+		}
+
+		if (!res.ok) {
+			const errData = await res.json().catch(() => ({}));
+			const message = errData?.error?.message || res.statusText || "API error";
+			if (res.status === 400 && /API key not valid|API_KEY_INVALID/i.test(message)) {
+				throw new Error("Your Gemini API key is invalid. Update it in the side panel settings.");
+			}
+			if (!isTransient(res.status)) throw new Error(message);
+			lastError = message;
+			continue;
+		}
+
+		// Parse SSE stream and accumulate text.
+		const reader = res.body.getReader();
+		const decoder = new TextDecoder();
+		let accumulated = "";
+		let buffer = "";
+
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.startsWith("data: ")) continue;
+				const data = line.slice(6).trim();
+				if (!data || data === "[DONE]") continue;
+				try {
+					const json = JSON.parse(data);
+					const text = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+					if (text) {
+						accumulated += text;
+						onChunk?.(accumulated);
+					}
+				} catch (_) {}
+			}
+		}
+
+		return accumulated;
+	}
+
+	throw new Error(`Gemini is busy right now. ${lastError}`);
 }
 
 /**

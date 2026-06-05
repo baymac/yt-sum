@@ -98,11 +98,17 @@ export function findInsertionPoint(container) {
 	// we specifically prefer the metadata line (sits right under the title).
 	const meta =
 		container.querySelector("#metadata-line") ||
+		container.querySelector("#metadata") ||
 		container.querySelector("#meta") ||
 		container.querySelector("ytd-video-meta-block");
 	if (meta?.parentNode) return { parent: meta.parentNode, before: meta.nextSibling };
 
-	const details = container.querySelector("#details, #dismissible");
+	// For compact renderers (watch page right rail): append inside #details so
+	// the button appears below the title/channel info rather than before the thumb.
+	const detailsEl = container.querySelector("#details");
+	if (detailsEl) return { parent: detailsEl, before: null };
+
+	const details = container.querySelector("#dismissible");
 	if (details?.firstElementChild)
 		return { parent: details, before: details.firstElementChild };
 
