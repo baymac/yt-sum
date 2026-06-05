@@ -4,231 +4,144 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YouTube Summarizer Settings</title>
+  <title>YouTube Summarizer</title>
   <style>
-    *, *::before, *::after {
-      box-sizing: border-box;
-    }
+    *, *::before, *::after { box-sizing: border-box; }
     body {
       width: 100%;
       max-width: 100%;
-      padding: 16px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      padding: 0;
       margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
       overflow-x: hidden;
+      color: #1a1a1a;
+      background: #fff;
     }
 
-    h1 {
-      font-size: 20px;
-      margin: 0 0 20px 0;
-      color: #333;
-    }
-
-    .form-group {
-      margin-bottom: 20px;
-    }
-
-    label {
-      display: block;
-      margin-bottom: 8px;
-      font-weight: 500;
-      color: #555;
-      font-size: 14px;
-    }
-
-    input[type="text"] {
-      width: 100%;
-      padding: 10px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      font-size: 14px;
-      box-sizing: border-box;
-    }
-
-    input[type="text"]:focus {
-      outline: none;
-      border-color: #1976d2;
-      box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.1);
-    }
-
-    button {
-      background-color: #1976d2;
-      color: white;
-      border: none;
-      padding: 10px 20px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 14px;
-      font-weight: 500;
-      width: 100%;
-    }
-
-    button:hover {
-      background-color: #1565c0;
-    }
-
-    button:disabled {
-      background-color: #ccc;
-      cursor: not-allowed;
-    }
-
-    .status {
-      margin-top: 15px;
-      padding: 10px;
-      border-radius: 4px;
-      font-size: 13px;
-      display: none;
-    }
-
-    .status.success {
-      background-color: #e8f5e9;
-      color: #2e7d32;
-      display: block;
-    }
-
-    .status.error {
-      background-color: #ffebee;
-      color: #c62828;
-      display: block;
-    }
-
-    .help-text {
-      font-size: 12px;
-      color: #666;
-      margin-top: 8px;
-    }
-
-    a {
-      color: #1976d2;
-      text-decoration: none;
-    }
-
-    a:hover {
-      text-decoration: underline;
-    }
-
-    .dark-mode-toggle {
+    .panel-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 20px;
-      padding: 12px;
-      background-color: #f5f5f5;
-      border-radius: 8px;
+      padding: 14px 16px;
+      border-bottom: 1px solid #eee;
+      position: sticky;
+      top: 0;
+      background: #fff;
+      z-index: 5;
     }
+    .panel-header h1 { font-size: 17px; margin: 0; }
+    .icon-btn {
+      background: transparent; border: none; cursor: pointer;
+      font-size: 18px; padding: 4px 8px; border-radius: 6px; line-height: 1;
+    }
+    .icon-btn:hover { background: #f0f0f0; }
 
-    .dark-mode-toggle label {
-      margin: 0;
-      font-weight: 500;
-      color: #333;
-      cursor: pointer;
-      flex: 1;
-    }
+    section { padding: 16px; }
 
-    .toggle-switch {
-      position: relative;
-      width: 48px;
-      height: 24px;
-      background-color: #ccc;
-      border-radius: 12px;
-      cursor: pointer;
-      transition: background-color 0.3s;
+    .primary-btn {
+      width: 100%;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #fff; border: none; padding: 11px 16px; border-radius: 8px;
+      font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity .2s;
     }
+    .primary-btn:hover { opacity: .92; }
+    .primary-btn:disabled { opacity: .6; cursor: not-allowed; }
 
-    .toggle-switch.active {
-      background-color: #1976d2;
-    }
+    .hint { color: #777; font-size: 13px; margin-top: 14px; line-height: 1.6; }
 
-    .toggle-switch::after {
-      content: '';
-      position: absolute;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background-color: white;
-      top: 2px;
-      left: 2px;
-      transition: transform 0.3s;
-      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    .summary-status { margin-top: 14px; font-size: 13px; color: #555; min-height: 0; }
+    .summary-status.error {
+      background: #ffebee; color: #c62828; padding: 10px 12px;
+      border-radius: 6px; border-left: 4px solid #c62828;
     }
+    .summary-status .loader { display: inline-flex; gap: 6px; align-items: center; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #667eea; animation: bounce 1.4s infinite ease-in-out both; }
+    .dot:nth-child(1){animation-delay:-.32s} .dot:nth-child(2){animation-delay:-.16s}
+    @keyframes bounce { 0%,80%,100%{transform:scale(0);opacity:.5} 40%{transform:scale(1);opacity:1} }
 
-    .toggle-switch.active::after {
-      transform: translateX(24px);
-    }
+    .source-note { font-size: 12px; color: #888; font-style: italic; margin: 0 0 12px; }
 
-    /* Dark mode styles */
-    body.dark-mode {
-      background-color: #1e1e1e;
-      color: #e0e0e0;
-    }
+    .summary-body { margin-top: 16px; font-size: 14px; line-height: 1.7; color: #222; }
+    .summary-body h1, .summary-body h2, .summary-body h3 { font-size: 15px; margin: 18px 0 8px; }
+    .summary-body h2 { font-size: 16px; }
+    .summary-body h1:first-child, .summary-body h2:first-child { margin-top: 0; }
+    .summary-body ul, .summary-body ol { margin: 8px 0; padding-left: 22px; }
+    .summary-body li { margin: 5px 0; }
+    .summary-body p { margin: 10px 0; }
+    .summary-body code { background: #f3f3f3; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    .summary-body a { color: #1976d2; }
 
-    body.dark-mode h1 {
-      color: #e0e0e0;
+    .form-group { margin-bottom: 18px; }
+    label { display: block; margin-bottom: 6px; font-weight: 500; color: #555; font-size: 13px; }
+    input[type="text"], input[type="password"] {
+      width: 100%; padding: 9px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;
     }
+    input:focus { outline: none; border-color: #1976d2; box-shadow: 0 0 0 2px rgba(25,118,210,.1); }
+    .help-text { font-size: 12px; color: #666; margin-top: 6px; }
+    a { color: #1976d2; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    #saveBtn { width: 100%; background: #1976d2; color: #fff; border: none; padding: 10px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; }
+    #saveBtn:hover { background: #1565c0; }
 
-    body.dark-mode label {
-      color: #b0b0b0;
-    }
+    .status { margin-top: 12px; padding: 9px 11px; border-radius: 6px; font-size: 13px; display: none; }
+    .status.success { background: #e8f5e9; color: #2e7d32; display: block; }
+    .status.error { background: #ffebee; color: #c62828; display: block; }
 
-    body.dark-mode input[type="text"] {
-      background-color: #2d2d2d;
-      border-color: #444;
-      color: #e0e0e0;
-    }
+    .dark-mode-toggle { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; padding: 12px; background: #f5f5f5; border-radius: 8px; }
+    .dark-mode-toggle label { margin: 0; cursor: pointer; }
+    .toggle-switch { position: relative; width: 46px; height: 24px; background: #ccc; border-radius: 12px; cursor: pointer; transition: background-color .3s; flex-shrink: 0; }
+    .toggle-switch.active { background: #1976d2; }
+    .toggle-switch::after { content:''; position:absolute; width:20px; height:20px; border-radius:50%; background:#fff; top:2px; left:2px; transition: transform .3s; box-shadow: 0 2px 4px rgba(0,0,0,.2); }
+    .toggle-switch.active::after { transform: translateX(22px); }
 
-    body.dark-mode input[type="text"]:focus {
-      border-color: #1976d2;
-      box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.3);
-    }
-
-    body.dark-mode .help-text {
-      color: #888;
-    }
-
-    body.dark-mode a {
-      color: #64b5f6;
-    }
-
-    body.dark-mode .status.success {
-      background-color: #1b5e20;
-      color: #81c784;
-    }
-
-    body.dark-mode .status.error {
-      background-color: #b71c1c;
-      color: #e57373;
-    }
-
-    body.dark-mode .dark-mode-toggle {
-      background-color: #2d2d2d;
-    }
-
-    body.dark-mode .dark-mode-toggle label {
-      color: #e0e0e0;
-    }
+    /* Dark mode */
+    body.dark-mode { background: #1e1e1e; color: #e0e0e0; }
+    body.dark-mode .panel-header { background: #1e1e1e; border-bottom-color: #333; }
+    body.dark-mode .icon-btn:hover { background: #2d2d2d; }
+    body.dark-mode .summary-body { color: #e0e0e0; }
+    body.dark-mode .summary-body code { background: #2d2d2d; }
+    body.dark-mode .summary-body a, body.dark-mode a { color: #64b5f6; }
+    body.dark-mode label { color: #b0b0b0; }
+    body.dark-mode input[type="text"], body.dark-mode input[type="password"] { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
+    body.dark-mode .dark-mode-toggle { background: #2d2d2d; }
+    body.dark-mode .help-text { color: #888; }
+    body.dark-mode .hint, body.dark-mode .summary-status { color: #aaa; }
   </style>
 </head>
 
 <body>
-  <h1>📝 YouTube Summarizer</h1>
-
-  <div class="dark-mode-toggle">
-    <label for="darkModeToggle">Dark Mode</label>
-    <div id="darkModeToggle" class="toggle-switch"></div>
+  <div class="panel-header">
+    <h1 id="panelTitle">📝 Summarizer</h1>
+    <button id="settingsToggle" class="icon-btn" title="Settings" aria-label="Settings">⚙️</button>
   </div>
 
-  <div class="form-group">
-    <label for="apiKey">Gemini API Key</label>
-    <input type="text" id="apiKey" placeholder="Enter your Google Gemini API key">
-    <div class="help-text">
-      Get your API key from
-      <a href="https://makersuite.google.com/app/apikey" target="_blank">Google AI Studio</a>
+  <section id="summaryView">
+    <button id="summarizeCurrentBtn" class="primary-btn">Summarize current video</button>
+    <div id="summaryStatus" class="summary-status"></div>
+    <div id="summaryBody" class="summary-body"></div>
+    <p id="idleHint" class="hint">
+      Open a YouTube video and click <strong>Summarize current video</strong>, or use the
+      <strong>📝 Summarize</strong> button on any thumbnail on the home page.
+    </p>
+  </section>
+
+  <section id="settingsView" hidden>
+    <div class="dark-mode-toggle">
+      <label for="darkModeToggle">Dark Mode</label>
+      <div id="darkModeToggle" class="toggle-switch" role="switch" tabindex="0"></div>
     </div>
-  </div>
-
-  <button id="saveBtn">Save API Key</button>
-
-  <div id="status" class="status"></div>
+    <div class="form-group">
+      <label for="apiKey">Gemini API Key</label>
+      <input type="password" id="apiKey" placeholder="Enter your Google Gemini API key" autocomplete="off">
+      <div class="help-text">
+        Get a free key from
+        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Google AI Studio</a>.
+        Stored only in your browser.
+      </div>
+    </div>
+    <button id="saveBtn">Save API Key</button>
+    <div id="status" class="status"></div>
+  </section>
 
   <script src="popup.js"></script>
 </body>
