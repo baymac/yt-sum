@@ -68,8 +68,29 @@ document.addEventListener("DOMContentLoaded", async () => {
 		}
 	});
 
-	// ── Summarize current video ────────────────────────────────────────────────
+	// Tracks the video currently being summarized, so the Cancel click can tell
+	// the background which in-flight request to abort.
+	let currentVideoId = null;
+
+	const setBusy = (busy) => {
+		els.summarizeBtn.dataset.busy = busy ? "1" : "";
+		els.summarizeBtn.disabled = false;
+		els.summarizeBtn.textContent = busy ? "✕ Cancel" : "Summarize current video";
+	};
+
+	// ── Summarize current video / cancel ─────────────────────────────────────────
 	els.summarizeBtn.addEventListener("click", async () => {
+		// While a summary is running the button is a Cancel control.
+		if (els.summarizeBtn.dataset.busy === "1") {
+			if (currentVideoId) {
+				chrome.runtime.sendMessage(
+					{ type: MSG.CANCEL_SUMMARY, videoId: currentVideoId },
+					() => { void chrome.runtime?.lastError; },
+				);
+			}
+			renderState({ status: "idle" });
+			return;
+		}
 		// Disable immediately to prevent duplicate requests while waiting for
 		// the loading state broadcast from the background.
 		els.summarizeBtn.disabled = true;
@@ -107,6 +128,18 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 	function renderState(state) {
 		if (!state) return;
+		if (state.videoId) currentVideoId = state.videoId;
+
+		// A cancelled/idle run resets the panel to its empty prompt.
+		if (state.status === "idle") {
+			els.summaryStatus.className = "summary-status";
+			els.summaryStatus.textContent = "";
+			els.summaryBody.innerHTML = "";
+			els.idleHint.removeAttribute("hidden");
+			setBusy(false);
+			return;
+		}
+
 		els.idleHint.toggleAttribute("hidden", true);
 		// Ensure summary view is visible when a result arrives.
 		els.settingsView.setAttribute("hidden", "");
@@ -120,18 +153,18 @@ document.addEventListener("DOMContentLoaded", async () => {
 			els.summaryStatus.innerHTML =
 				'<span class="loader"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span> Reading the transcript…';
 			els.summaryBody.innerHTML = "";
-			els.summarizeBtn.disabled = true;
+			setBusy(true);
 		} else if (state.status === "streaming") {
 			els.summaryStatus.className = "summary-status";
 			els.summaryStatus.innerHTML =
 				'<span class="loader"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>';
 			els.summaryBody.innerHTML = formatSummary(state.text || "");
-			els.summarizeBtn.disabled = true;
+			setBusy(true);
 		} else if (state.status === "error") {
 			els.summaryStatus.className = "summary-status error";
 			els.summaryStatus.textContent = state.error || "Failed to summarize.";
 			els.summaryBody.innerHTML = "";
-			els.summarizeBtn.disabled = false;
+			setBusy(false);
 		} else if (state.status === "done") {
 			els.summaryStatus.className = "summary-status";
 			els.summaryStatus.textContent = "";
@@ -140,7 +173,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 					? '<p class="source-note">Captions were unavailable, so Gemini watched the video to produce this.</p>'
 					: "";
 			els.summaryBody.innerHTML = note + formatSummary(state.text || "");
-			els.summarizeBtn.disabled = false;
+			setBusy(false);
 		}
 	}
 });

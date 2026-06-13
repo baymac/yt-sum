@@ -167,11 +167,13 @@ export async function callGeminiStreaming({
 	fetchImpl,
 	sleepImpl = sleep,
 	maxAttempts = 3,
+	signal,
 }) {
 	const f = fetchImpl || globalThis.fetch;
 	let lastError = "Request failed.";
 
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 		if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1000);
 
 		let res;
@@ -183,8 +185,11 @@ export async function callGeminiStreaming({
 					"x-goog-api-key": apiKey,
 				},
 				body: JSON.stringify(body),
+				signal,
 			});
 		} catch (e) {
+			// Cancellation is not transient — propagate, don't retry.
+			if (signal?.aborted || e?.name === "AbortError") throw e;
 			lastError = `Network error: ${e?.message || e}`;
 			continue;
 		}

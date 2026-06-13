@@ -9,6 +9,9 @@ import {
 	parseJson3,
 	fetchTranscript,
 	describeTranscriptFailure,
+	parseInnertubeConfig,
+	parseCookies,
+	makeSidAuthorization,
 } from "../../src/lib/transcript.js";
 
 const fixture = (name) =>
@@ -105,6 +108,49 @@ describe("describeTranscriptFailure", () => {
 	});
 });
 
+describe("parseInnertubeConfig", () => {
+	it("extracts apiKey and visitorData from page HTML", () => {
+		const html = `<script>ytcfg.set({"INNERTUBE_API_KEY":"AIzaTESTKEY","VISITOR_DATA":"VD123"});</script>`;
+		const cfg = parseInnertubeConfig(html);
+		expect(cfg.apiKey).toBe("AIzaTESTKEY");
+		expect(cfg.visitorData).toBe("VD123");
+	});
+	it("returns null when no API key is present", () => {
+		expect(parseInnertubeConfig("<html></html>")).toBeNull();
+	});
+});
+
+describe("parseCookies", () => {
+	it("parses a document.cookie string into a name→value map", () => {
+		const c = parseCookies("SAPISID=abc; __Secure-3PAPISID=def; PREF=tz=Asia");
+		expect(c.SAPISID).toBe("abc");
+		expect(c["__Secure-3PAPISID"]).toBe("def");
+		// only splits on the first '=' so values containing '=' survive
+		expect(c.PREF).toBe("tz=Asia");
+	});
+	it("returns an empty map for empty input", () => {
+		expect(parseCookies("")).toEqual({});
+	});
+});
+
+describe("makeSidAuthorization", () => {
+	it("builds SAPISIDHASH/1P/3P parts with sha1(ts SP sid SP origin)", async () => {
+		// now = 1_000_000 ms → ts = 1000
+		const auth = await makeSidAuthorization(
+			"SAPISID=sap; __Secure-1PAPISID=p1; __Secure-3PAPISID=p3",
+			1_000_000,
+		);
+		expect(auth).toMatch(/^SAPISIDHASH 1000_[0-9a-f]{40} SAPISID1PHASH 1000_[0-9a-f]{40} SAPISID3PHASH 1000_[0-9a-f]{40}$/);
+	});
+	it("falls back to __Secure-3PAPISID when SAPISID is absent", async () => {
+		const auth = await makeSidAuthorization("__Secure-3PAPISID=p3", 0);
+		expect(auth).toMatch(/^SAPISIDHASH 0_[0-9a-f]{40} SAPISID3PHASH 0_[0-9a-f]{40}$/);
+	});
+	it("returns null when no auth cookie is present (logged out)", async () => {
+		expect(await makeSidAuthorization("PREF=x; YSC=y")).toBeNull();
+	});
+});
+
 describe("buildTimedtextUrl", () => {
 	it("adds fmt=json3 and preserves existing params", () => {
 		const url = buildTimedtextUrl("https://www.youtube.com/api/timedtext?v=ID&lang=en");
@@ -163,7 +209,7 @@ describe("fetchTranscript", () => {
 		expect(res.title).toBe("Test Video");
 	});
 
-	it("reports pot-gated without fetching timedtext (exp=xpe)", async () => {
+	it("still attempts the fetch when pot-gated (exp=xpe) — cookies often bypass POT", async () => {
 		let timedtextHit = false;
 		const fetchImpl = async (url) => {
 			if (url.includes("/watch"))
@@ -182,12 +228,109 @@ describe("fetchTranscript", () => {
 						}),
 				};
 			timedtextHit = true;
-			return { ok: true, text: async () => "" };
+			// Same-origin logged-in cookies return the captions despite exp=xpe.
+			return { ok: true, status: 200, text: async () => JSON.stringify(realJson3) };
 		};
 		const res = await fetchTranscript("ID", { fetchImpl });
+		expect(timedtextHit).toBe(true);
+		expect(res.ok).toBe(true);
+		expect(res.text).toContain("We're no strangers");
+	});
+
+	it("falls back to a simplified timedtext URL when the pot-gated baseUrl returns empty", async () => {
+		const fetchImpl = async (url) => {
+			if (url.includes("/watch"))
+				return {
+					ok: true,
+					text: async () =>
+						watchHtml({
+							...okPlayer,
+							captions: {
+								playerCaptionsTracklistRenderer: {
+									captionTracks: [
+										track({ baseUrl: "https://www.youtube.com/api/timedtext?v=ID&exp=xpe&lang=en" }),
+									],
+								},
+							},
+						}),
+				};
+			// The pot-gated (exp=xpe) baseUrl is rejected with an empty body; the
+			// simplified URL (no server params, no exp flag) serves the captions.
+			const body = url.includes("exp=xpe") ? "" : JSON.stringify(realJson3);
+			return { ok: true, status: 200, text: async () => body };
+		};
+		const res = await fetchTranscript("ID", { fetchImpl });
+		expect(res.ok).toBe(true);
+		expect(res.text).toContain("We're no strangers");
+	});
+
+	it("recovers via the InnerTube web_creator player when timedtext is pot-blocked", async () => {
+		// Watch page exposes an api key and a pot-gated (exp=xpe) WEB caption URL.
+		const html = `<script>ytcfg.set({"INNERTUBE_API_KEY":"AIzaKEY","VISITOR_DATA":"VD"});</script>${watchHtml(
+			{
+				...okPlayer,
+				captions: {
+					playerCaptionsTracklistRenderer: {
+						captionTracks: [track({ baseUrl: "https://www.youtube.com/api/timedtext?v=ID&exp=xpe&lang=en" })],
+					},
+				},
+			},
+		)}`;
+		let sawAuth = false;
+		const fetchImpl = async (url, opts) => {
+			if (url.includes("/watch")) return { ok: true, status: 200, text: async () => html };
+			// The pot-gated WEB timedtext (exp=xpe) and the simplified URL are empty.
+			if (url.includes("timedtext") && !url.includes("signature"))
+				return { ok: true, status: 200, text: async () => "" };
+			if (url.includes("/youtubei/v1/player")) {
+				// web_creator must be authenticated.
+				if (opts?.headers?.Authorization?.startsWith("SAPISIDHASH ")) sawAuth = true;
+				return {
+					ok: true,
+					status: 200,
+					text: async () =>
+						JSON.stringify({
+							playabilityStatus: { status: "OK" },
+							captions: {
+								playerCaptionsTracklistRenderer: {
+									// Un-gated, server-signed caption URL (no exp=xpe).
+									captionTracks: [
+										track({ baseUrl: "https://www.youtube.com/api/timedtext?v=ID&lang=en&signature=SIG&key=yt8" }),
+									],
+								},
+							},
+						}),
+				};
+			}
+			// The signed caption URL serves real json3.
+			if (url.includes("timedtext") && url.includes("signature"))
+				return { ok: true, status: 200, text: async () => JSON.stringify(realJson3) };
+			throw new Error(`unexpected url ${url}`);
+		};
+		const res = await fetchTranscript("ID", { fetchImpl, cookieStr: "SAPISID=abc; __Secure-3PAPISID=def" });
+		expect(sawAuth).toBe(true);
+		expect(res.ok).toBe(true);
+		expect(res.source).toBe("innertube");
+		expect(res.text).toContain("We're no strangers");
+	});
+
+	it("skips the InnerTube player fallback when logged out (no SAPISID cookie)", async () => {
+		const html = `<script>ytcfg.set({"INNERTUBE_API_KEY":"AIzaKEY"});</script>${watchHtml({
+			...okPlayer,
+			captions: {
+				playerCaptionsTracklistRenderer: {
+					captionTracks: [track({ baseUrl: "https://www.youtube.com/api/timedtext?v=ID&exp=xpe&lang=en" })],
+				},
+			},
+		})}`;
+		const fetchImpl = async (url) => {
+			if (url.includes("/watch")) return { ok: true, status: 200, text: async () => html };
+			if (url.includes("timedtext")) return { ok: true, status: 200, text: async () => "" };
+			throw new Error(`unexpected url ${url}`); // player must NOT be called
+		};
+		const res = await fetchTranscript("ID", { fetchImpl, cookieStr: "" });
 		expect(res.ok).toBe(false);
-		expect(res.reason).toBe("pot-gated");
-		expect(timedtextHit).toBe(false);
+		expect(res.reason).toBe("pot-blocked");
 	});
 
 	it("treats HTTP 200 + empty body as pot-blocked, not 'no captions'", async () => {
@@ -237,12 +380,15 @@ describe("fetchTranscript", () => {
 		expect(res.reason).toBe("no-player-response");
 	});
 
-	it("flags the real fixture as pot-gated end-to-end", async () => {
+	it("falls through to pot-blocked when the real fixture's caption fetches all return empty", async () => {
+		// The real fixture's baseUrl is exp=xpe; with every timedtext attempt
+		// (primary + simplified) returning empty, we end at pot-blocked — the
+		// caller then escalates to the Gemini video fallback.
 		const res = await fetchTranscript("ID", {
 			fetchImpl: makeFetch({ html: realWatchHtml, timedtext: "" }),
 		});
 		expect(res.ok).toBe(false);
-		expect(res.reason).toBe("pot-gated");
+		expect(res.reason).toBe("pot-blocked");
 	});
 
 	it("reports fetch-failed when the initial watch fetch throws", async () => {

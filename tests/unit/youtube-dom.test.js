@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+	VIDEO_CONTAINER_SELECTORS,
 	extractVideoId,
 	isWatchUrl,
 	getWatchVideoId,
@@ -40,6 +41,12 @@ describe("isWatchUrl / getWatchVideoId", () => {
 	});
 });
 
+describe("VIDEO_CONTAINER_SELECTORS", () => {
+	it("matches watch-page related tiles (yt-lockup-view-model)", () => {
+		expect(VIDEO_CONTAINER_SELECTORS).toContain("yt-lockup-view-model");
+	});
+});
+
 describe("getVideoTitle", () => {
 	function container(html) {
 		const div = document.createElement("div");
@@ -73,6 +80,12 @@ describe("getVideoTitle", () => {
 		const c = container('<a href="/watch?v=dQw4w9WgXcQ" title="Title From Attr"></a>');
 		expect(getVideoTitle(c, c.querySelector("a"))).toBe("Title From Attr");
 	});
+	it("reads the lockup heading on a yt-lockup-view-model tile", () => {
+		const c = container(
+			'<a class="ytLockupMetadataViewModelHeadingReset" href="/watch?v=dQw4w9WgXcQ">Lockup Tile Title</a>',
+		);
+		expect(getVideoTitle(c, c.querySelector("a"))).toBe("Lockup Tile Title");
+	});
 });
 
 describe("findInsertionPoint / insertButton", () => {
@@ -96,6 +109,15 @@ describe("findInsertionPoint / insertButton", () => {
 		const btn = document.createElement("button");
 		expect(insertButton(c, btn)).toBe(true);
 		expect(c.contains(btn)).toBe(true);
+	});
+	it("inserts after the lockup metadata block for a yt-lockup-view-model fixture", () => {
+		const c = container(
+			'<div class="thumb"></div><yt-content-metadata-view-model></yt-content-metadata-view-model>',
+		);
+		const btn = document.createElement("button");
+		expect(insertButton(c, btn)).toBe(true);
+		const meta = c.querySelector("yt-content-metadata-view-model");
+		expect(meta.nextSibling).toBe(btn);
 	});
 	it("inserts inside #details (not fallback container) when no metadata line exists", () => {
 		const c = container('<div id="details"><span id="first-child"></span></div>');

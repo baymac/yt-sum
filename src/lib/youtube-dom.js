@@ -9,6 +9,7 @@ export const VIDEO_CONTAINER_SELECTORS = [
 	"ytd-compact-video-renderer",
 	"ytd-playlist-video-renderer",
 	"ytd-rich-grid-media",
+	"yt-lockup-view-model",
 ];
 
 const DURATION_RE = /^\d+:\d+(?::\d+)?$/;
@@ -61,7 +62,7 @@ export function getVideoTitle(container, videoLink) {
 	const clean = (s) => (s || "").replace(/\s+\d+:\d+(?::\d+)?\s*$/, "").trim();
 
 	const titleEl = container?.querySelector?.(
-		"#video-title, a#video-title-link, #video-title-link",
+		"#video-title, a#video-title-link, #video-title-link, a.ytLockupMetadataViewModelHeadingReset, .ytLockupMetadataViewModelHeadingReset",
 	);
 	if (titleEl) {
 		const t =
@@ -102,6 +103,11 @@ export function findInsertionPoint(container) {
 		container.querySelector("#meta") ||
 		container.querySelector("ytd-video-meta-block");
 	if (meta?.parentNode) return { parent: meta.parentNode, before: meta.nextSibling };
+
+	// Watch-page related rail uses yt-lockup-view-model: insert right after the
+	// metadata block so the button sits under the title/channel.
+	const lockupMeta = container.querySelector("yt-content-metadata-view-model");
+	if (lockupMeta?.parentNode) return { parent: lockupMeta.parentNode, before: lockupMeta.nextSibling };
 
 	// For compact renderers (watch page right rail): append inside #details so
 	// the button appears below the title/channel info rather than before the thumb.

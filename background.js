@@ -69,11 +69,13 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     onChunk,
     fetchImpl,
     sleepImpl = sleep,
-    maxAttempts = 3
+    maxAttempts = 3,
+    signal
   }) {
     const f = fetchImpl || globalThis.fetch;
     let lastError = "Request failed.";
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1e3);
       let res;
       try {
@@ -83,9 +85,11 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
             "Content-Type": "application/json",
             "x-goog-api-key": apiKey
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
+          signal
         });
       } catch (e) {
+        if (signal?.aborted || e?.name === "AbortError") throw e;
         lastError = `Network error: ${e?.message || e}`;
         continue;
       }
@@ -153,7 +157,8 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     SUMMARY_STATE_REQUEST: "SUMMARY_STATE_REQUEST",
     OPEN_SIDE_PANEL: "OPEN_SIDE_PANEL",
     SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR",
-    SUMMARY_PROGRESS: "SUMMARY_PROGRESS"
+    SUMMARY_PROGRESS: "SUMMARY_PROGRESS",
+    CANCEL_SUMMARY: "CANCEL_SUMMARY"
   };
   var SESSION_KEY = "currentSummary";
 
@@ -190,6 +195,14 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     }
   }
   var YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
+  var activeRequests = /* @__PURE__ */ new Map();
+  function cancelRequest(videoId) {
+    const controller = videoId && activeRequests.get(videoId);
+    if (controller) {
+      controller.abort();
+      activeRequests.delete(videoId);
+    }
+  }
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.id !== chrome.runtime.id) return false;
     switch (message?.type) {
@@ -197,6 +210,10 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         handleGenerate(message, sender, sendResponse);
         return true;
       // async response
+      case MSG.CANCEL_SUMMARY:
+        cancelRequest(message.videoId);
+        sendResponse?.({ ok: true });
+        return false;
       case MSG.PUBLISH_SUMMARY:
         setSessionState(message.payload);
         sendResponse?.({ ok: true });
@@ -232,13 +249,16 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         videoUrl: message.videoUrl
       });
       const tabId = sender?.tab?.id;
-      const { target, token } = message;
+      const { target, token, videoId } = message;
+      const controller = new AbortController();
+      if (videoId) activeRequests.set(videoId, controller);
       let finalText = "";
       try {
         finalText = await callGeminiStreaming({
           apiKey: geminiApiKey,
           model: GEMINI_MODEL,
           body,
+          signal: controller.signal,
           onChunk: (accumulated) => {
             if (tabId != null) {
               chrome.tabs.sendMessage(
@@ -252,8 +272,14 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
           }
         });
       } catch (e) {
+        if (controller.signal.aborted || e?.name === "AbortError") {
+          sendResponse({ ok: false, cancelled: true });
+          return;
+        }
         sendResponse({ ok: false, error: e?.message || "Failed to summarize." });
         return;
+      } finally {
+        if (videoId) activeRequests.delete(videoId);
       }
       if (!finalText) {
         sendResponse({ ok: false, error: "Gemini returned no summary (response may have been blocked)." });

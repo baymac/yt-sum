@@ -52,6 +52,18 @@ async function getSessionState() {
 // the Gemini API key from being leveraged to process attacker-controlled URLs.
 const YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
 
+// In-flight Gemini requests, keyed by videoId, so a cancel from any surface
+// (modal close, watch button, side-panel) can abort the actual network call.
+const activeRequests = new Map();
+
+function cancelRequest(videoId) {
+	const controller = videoId && activeRequests.get(videoId);
+	if (controller) {
+		controller.abort();
+		activeRequests.delete(videoId);
+	}
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 	// Only process messages from this extension's own scripts.
 	if (sender.id !== chrome.runtime.id) return false;
@@ -60,6 +72,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 		case MSG.GENERATE_SUMMARY:
 			handleGenerate(message, sender, sendResponse);
 			return true; // async response
+
+		case MSG.CANCEL_SUMMARY:
+			cancelRequest(message.videoId);
+			sendResponse?.({ ok: true });
+			return false;
 
 		case MSG.PUBLISH_SUMMARY:
 			setSessionState(message.payload);
@@ -102,7 +119,10 @@ async function handleGenerate(message, sender, sendResponse) {
 		});
 
 		const tabId = sender?.tab?.id;
-		const { target, token } = message;
+		const { target, token, videoId } = message;
+
+		const controller = new AbortController();
+		if (videoId) activeRequests.set(videoId, controller);
 
 		let finalText = "";
 		try {
@@ -110,6 +130,7 @@ async function handleGenerate(message, sender, sendResponse) {
 				apiKey: geminiApiKey,
 				model: GEMINI_MODEL,
 				body,
+				signal: controller.signal,
 				onChunk: (accumulated) => {
 					if (tabId != null) {
 						chrome.tabs.sendMessage(
@@ -121,8 +142,15 @@ async function handleGenerate(message, sender, sendResponse) {
 				},
 			});
 		} catch (e) {
+			// Aborted by the user — not an error to surface.
+			if (controller.signal.aborted || e?.name === "AbortError") {
+				sendResponse({ ok: false, cancelled: true });
+				return;
+			}
 			sendResponse({ ok: false, error: e?.message || "Failed to summarize." });
 			return;
+		} finally {
+			if (videoId) activeRequests.delete(videoId);
 		}
 
 		if (!finalText) {
