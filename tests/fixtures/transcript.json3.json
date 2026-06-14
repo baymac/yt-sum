@@ -1,0 +1,59 @@
+{
+  "wireMagic": "pb3",
+  "events": [
+    {
+      "tStartMs": 0,
+      "dDurationMs": 2000,
+      "segs": [
+        {
+          "utf8": "We're no strangers"
+        }
+      ]
+    },
+    {
+      "tStartMs": 2000,
+      "dDurationMs": 2000,
+      "segs": [
+        {
+          "utf8": " to love"
+        }
+      ]
+    },
+    {
+      "tStartMs": 4000,
+      "dDurationMs": 3000,
+      "segs": [
+        {
+          "utf8": "You know"
+        },
+        {
+          "utf8": " the rules"
+        },
+        {
+          "utf8": " and so do I"
+        }
+      ]
+    },
+    {
+      "tStartMs": 7000,
+      "dDurationMs": 100,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 7100,
+      "dDurationMs": 2500,
+      "segs": [
+        {
+          "utf8": "A full commitment's"
+        },
+        {
+          "utf8": " what I'm thinking of"
+        }
+      ]
+    }
+  ]
+}

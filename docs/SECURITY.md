@@ -1,5 +1,13 @@
 # Security Documentation - XSS Prevention
 
+> v2 note: code line references below are historical. The escaping logic now lives in
+> `src/lib/markdown.js` (`escapeHtml`, `formatSummary`). Two items previously flagged as
+> "could be enhanced" are now **implemented**:
+> - **Link URL sanitization** — `sanitizeUrl()` blocks `javascript:`/`data:`/`vbscript:`
+>   and relative/protocol-relative URLs, allowing only `http(s)`. Covered by tests.
+> - **API key isolation** — the Gemini key is read only in the background service worker
+>   (`src/background.js`); it is never passed into page or content-script context.
+
 ## How XSS is Prevented
 
 ### 1. HTML Escaping Function
@@ -26,7 +34,7 @@ function escapeHtml(text) {
 
 #### Video Titles (User Input from YouTube DOM)
 ```javascript
-// Line 431, 538
+// src/lib/modal.js
 <h3>${escapeHtml(title)}</h3>
 ```
 - All video titles are escaped before insertion
@@ -34,7 +42,7 @@ function escapeHtml(text) {
 
 #### API Response Content
 ```javascript
-// Line 585 - In processInlineMarkdown()
+// src/lib/markdown.js — processInlineMarkdown()
 str = escapeHtml(str);  // Escape FIRST before processing
 ```
 - All API response text is escaped before markdown processing
@@ -42,7 +50,7 @@ str = escapeHtml(str);  // Escape FIRST before processing
 
 #### Error Messages
 ```javascript
-// Line 401
+// src/lib/modal.js
 showSummaryModal("Error", `<div class="yt-sum-error">${message}</div>`, true);
 ```
 - Error messages are wrapped in divs (safe)
@@ -52,7 +60,7 @@ showSummaryModal("Error", `<div class="yt-sum-error">${message}</div>`, true);
 
 #### Static Content (No User Input)
 ```javascript
-// Line 172, 255, 395
+// src/content.js, src/lib/modal.js
 button.innerHTML = "📝 Summarize";  // Static string - safe
 button.innerHTML = "⏳ Summarizing...";  // Static string - safe
 ```
@@ -85,41 +93,26 @@ function processInlineMarkdown(str) {
 2. **Then process**: Regex replacements work on escaped text
 3. **Result**: Safe HTML with markdown formatting
 
-### 5. Potential Security Concerns & Mitigations
+### 5. Security Concerns & Mitigations
 
-#### ⚠️ Link URL Validation (Minor Risk)
+#### ✅ Link URL Validation
 
-**Current Implementation**:
+**Implementation** (`src/lib/markdown.js`):
 ```javascript
-str = str.replace(/\[([^\]]+)\]\(([^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener">$1</a>');
-```
-
-**Potential Issue**:
-- URLs are inserted directly into `href` without validation
-- Could allow `javascript:` URLs or other dangerous protocols
-
-**Mitigation**:
-- `rel="noopener"` prevents window.opener attacks
-- `target="_blank"` opens in new tab (isolated)
-- URLs come from Gemini API (trusted source)
-- User doesn't directly control URL content
-
-**Recommendation for Enhancement**:
-```javascript
-// Enhanced URL validation
 function sanitizeUrl(url) {
-    // Remove dangerous protocols
-    if (/^(javascript|data|vbscript):/i.test(url)) {
-        return '#';
-    }
-    // Only allow http/https
-    if (!/^https?:\/\//i.test(url)) {
-        return '#';
-    }
+    // Block dangerous protocols
+    if (/^(javascript|data|vbscript):/i.test(url)) return '#';
+    // Block relative and protocol-relative URLs — only http(s) allowed
+    if (!/^https?:\/\//i.test(url)) return '#';
     return url;
 }
 ```
+
+Links extracted from markdown are passed through `sanitizeUrl()` before insertion into `href`, blocking `javascript:`, `data:`, `vbscript:`, and protocol-relative URLs. Covered by unit tests in `tests/unit/markdown.test.js`.
+
+**Additional mitigations:**
+- `rel="noopener"` prevents window.opener attacks
+- `target="_blank"` opens in new tab (isolated)
 
 #### ✅ Safe Text Extraction
 
@@ -172,7 +165,9 @@ The extension inherits YouTube's CSP, which:
 - ✅ No eval() usage
 - ✅ Safe DOM reading (textContent)
 - ✅ Safe DOM writing (escaped innerHTML)
-- ⚠️ URL validation could be enhanced (low risk)
+- ✅ Link URL validation via `sanitizeUrl()` (blocks javascript:, data:, vbscript:)
+- ✅ Sender origin validated in background message handler (`chrome.runtime.id`)
+- ✅ YouTube domain validated for Gemini video-mode requests
 
 ### 10. Testing for XSS
 
@@ -185,16 +180,16 @@ To verify XSS protection, try these test cases:
    - Should be escaped and display as text
 
 3. **JavaScript URL**: Link with `javascript:alert('XSS')`
-   - Currently allowed but isolated in new tab
-   - Could be blocked with URL validation
+   - Blocked by `sanitizeUrl()` — returns `#` for any non-http(s) protocol
 
 ### Conclusion
 
 The extension has **strong XSS protection** through:
-- Comprehensive HTML escaping
-- Safe DOM manipulation practices
+- Comprehensive HTML escaping in `src/lib/markdown.js`
+- `sanitizeUrl()` blocking dangerous protocols in links
+- Safe DOM manipulation practices (textContent reads, escaped innerHTML writes)
 - No eval or dynamic script execution
 - Escaping before markdown processing
-
-The only minor enhancement would be URL protocol validation for links, but the current implementation is safe for typical use cases since URLs come from the trusted Gemini API.
+- Sender origin validation in the background message handler
+- YouTube domain enforcement for Gemini video-mode requests
 

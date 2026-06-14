@@ -1,0 +1,26 @@
+{
+  "name": "youtube-summarizer-extension",
+  "version": "2.1.0.0",
+  "description": "Chrome extension that summarizes YouTube videos from their full transcript using the Gemini API, with a native video-understanding fallback.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:watch": "node build.mjs --watch",
+    "icons": "node scripts/generate-icons.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "e2e": "playwright test",
+    "prepackage": "npm run build && npm run icons",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@vitest/coverage-v8": "^2.1.8",
+    "esbuild": "^0.24.2",
+    "jsdom": "^25.0.1",
+    "pngjs": "^7.0.0",
+    "vitest": "^2.1.8"
+  }
+}

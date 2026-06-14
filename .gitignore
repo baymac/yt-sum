@@ -3,8 +3,18 @@
 *.crx
 *.zip
 
-# Icons (you'll need to add these)
-icon*.png
+# Node / build
+node_modules/
+coverage/
+dist/
+
+# Playwright e2e artifacts
+test-results/
+playwright-report/
+tests/e2e/screenshots/
+
+# Conductor workspace scratch
+.context/
 
 # OS
 .DS_Store
@@ -18,3 +28,4 @@ Thumbs.db
 
 
 
+.gstack/

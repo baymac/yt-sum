@@ -1,192 +1,305 @@
-// Background service worker for handling API calls
+(() => {
+  // src/lib/summarize.js
+  var GEMINI_MODEL = "gemini-2.5-flash";
+  var STREAM_ENDPOINT = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+  var MAX_TRANSCRIPT_CHARS = 2e5;
+  var SUMMARY_INSTRUCTION = `You are summarizing a YouTube video so the reader does NOT have to watch it. Produce a clear, well-structured Markdown summary with these sections:
 
-// Ensure the side panel uses our settings UI
-async function setupSidePanel() {
-	try {
-		if (chrome?.sidePanel?.setOptions) {
-			await chrome.sidePanel.setOptions({
-				path: "popup.html",
-				enabled: true,
-			});
-		}
-		// Let Chrome open the side panel on action click automatically
-		if (chrome?.sidePanel?.setPanelBehavior) {
-			await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-		}
-	} catch (err) {
-		console.error("Error setting up side panel:", err);
-	}
-}
+## TL;DR
+2-3 sentences capturing the core message.
 
-// Set up side panel on install and startup
-chrome.runtime.onInstalled.addListener(() => {
-	setupSidePanel();
-});
+## Key Points
+A bulleted list of the main points, arguments, or steps in the order they appear. Be specific \u2014 include the concrete facts, numbers, names, and conclusions, not vague descriptions.
 
-chrome.runtime.onStartup.addListener(() => {
-	setupSidePanel();
-});
+## Details
+A few short paragraphs walking through the substance so the reader gets everything important without watching.
 
-// Optional: ensure per-tab options are set when icon is clicked (opening is handled by Chrome)
-chrome.action.onClicked.addListener((tab) => {
-	try {
-		if (chrome?.sidePanel?.setOptions) {
-			chrome.sidePanel
-				.setOptions({
-					tabId: tab.id,
-					path: "popup.html",
-					enabled: true,
-				})
-				.catch((err) => {
-					console.error("Error setting side panel options for tab:", err);
-				});
-		}
-	} catch (e) {
-		console.error("Unexpected error in action.onClicked:", e);
-	}
-});
+## Takeaways
+The most useful insights or action items.
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-	if (request.action === "summarize") {
-		handleSummarize(request, sendResponse);
-		return true; // Indicates we will send a response asynchronously
-	}
-});
+Write in plain, direct language. Do not invent content that isn't supported by the source.`;
+  function clampTranscript(text, max = MAX_TRANSCRIPT_CHARS) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return `${text.slice(0, max)}
 
-async function handleSummarize(request, sendResponse) {
-	try {
-		const { videoUrl, videoTitle, videoInfo, apiKey } = request;
+[transcript truncated for length]`;
+  }
+  function buildTranscriptPrompt({ title, transcript }) {
+    const head = title ? `Video title: ${title}
 
-		// Prepare prompt for Gemini
-		// Use the title from videoInfo if available, otherwise use videoTitle
-		const actualTitle =
-			videoInfo.title && videoInfo.title !== "Untitled Video"
-				? videoInfo.title
-				: videoTitle;
+` : "";
+    return `${SUMMARY_INSTRUCTION}
 
-		// Validate title is not a duration
-		const isValidTitle =
-			actualTitle && !actualTitle.match(/^\d+:\d+$/) && actualTitle.length > 3;
+${head}TRANSCRIPT:
+${clampTranscript(transcript)}`;
+  }
+  var GENERATION_CONFIG = { temperature: 0.3, maxOutputTokens: 8192 };
+  function buildRequestBody({ mode, title, transcript, videoUrl }) {
+    if (mode === "video") {
+      const ask = title ? `${SUMMARY_INSTRUCTION}
 
-		if (!isValidTitle) {
-			sendResponse({
-				error:
-					"Unable to extract video title. Please try clicking the button again or refresh the page.",
-			});
-			return;
-		}
+The video title is: ${title}` : SUMMARY_INSTRUCTION;
+      return {
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: ask }, { file_data: { file_uri: videoUrl } }]
+          }
+        ],
+        generationConfig: GENERATION_CONFIG
+      };
+    }
+    return {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: buildTranscriptPrompt({ title, transcript }) }]
+        }
+      ],
+      generationConfig: GENERATION_CONFIG
+    };
+  }
+  var isTransient = (status) => status === 429 || status >= 500;
+  var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function callGeminiStreaming({
+    apiKey,
+    model = GEMINI_MODEL,
+    body,
+    onChunk,
+    fetchImpl,
+    sleepImpl = sleep,
+    maxAttempts = 3,
+    signal
+  }) {
+    const f = fetchImpl || globalThis.fetch;
+    let lastError = "Request failed.";
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1e3);
+      let res;
+      try {
+        res = await f(STREAM_ENDPOINT(model), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": apiKey
+          },
+          body: JSON.stringify(body),
+          signal
+        });
+      } catch (e) {
+        if (signal?.aborted || e?.name === "AbortError") throw e;
+        lastError = `Network error: ${e?.message || e}`;
+        continue;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const message = errData?.error?.message || res.statusText || "API error";
+        if (res.status === 400 && /API key not valid|API_KEY_INVALID/i.test(message)) {
+          throw new Error("Your Gemini API key is invalid. Update it in the side panel settings.");
+        }
+        if (!isTransient(res.status)) throw new Error(message);
+        lastError = message;
+        continue;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const json = JSON.parse(data);
+            const text = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            if (text) {
+              accumulated += text;
+              onChunk?.(accumulated);
+            }
+          } catch (_) {
+          }
+        }
+      }
+      return accumulated;
+    }
+    throw new Error(`Gemini is busy right now. ${lastError}`);
+  }
 
-		const prompt = `Please watch and summarize this YouTube video:
+  // src/lib/storage.js
+  function storageGet(keys) {
+    return new Promise((resolve) => {
+      try {
+        const maybePromise = chrome.storage.sync.get(keys, (result) => {
+          resolve(result || {});
+        });
+        if (maybePromise && typeof maybePromise.then === "function") {
+          maybePromise.then((r) => resolve(r || {})).catch(() => resolve({}));
+        }
+      } catch (_) {
+        resolve({});
+      }
+    });
+  }
 
-Video URL: ${videoUrl}
-Title: ${actualTitle}
-${videoInfo.description ? `Description: ${videoInfo.description}` : ""}
+  // src/lib/messages.js
+  var MSG = {
+    GENERATE_SUMMARY: "GENERATE_SUMMARY",
+    PUBLISH_SUMMARY: "PUBLISH_SUMMARY",
+    SUMMARY_READY: "SUMMARY_READY",
+    SUMMARY_STATE_REQUEST: "SUMMARY_STATE_REQUEST",
+    OPEN_SIDE_PANEL: "OPEN_SIDE_PANEL",
+    SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR",
+    SUMMARY_PROGRESS: "SUMMARY_PROGRESS",
+    CANCEL_SUMMARY: "CANCEL_SUMMARY"
+  };
+  var SESSION_KEY = "currentSummary";
 
-Please watch the video at the URL above and provide a comprehensive summary including:
-1. Main topic and key points discussed in the video
-2. Important takeaways and insights
-3. Who would benefit from watching this video
-
-Provide a detailed summary based on the actual video content, not just the title. Keep it concise (2-3 paragraphs) and informative.`;
-
-		// Use Gemini 2.5 Flash only
-		// Try both v1 and v1beta API versions
-		const apiVersions = ["v1beta", "v1"];
-		let lastError = null;
-		let summaryText = null;
-
-		for (const version of apiVersions) {
-			for (let attempt = 0; attempt < 3; attempt++) {
-				try {
-					if (attempt > 0) {
-						// Exponential backoff: 1s, 2s, 4s
-						const delay = Math.pow(2, attempt - 1) * 1000;
-						await new Promise((resolve) => setTimeout(resolve, delay));
-					}
-
-					const response = await fetch(
-						`https://generativelanguage.googleapis.com/${version}/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-						{
-							method: "POST",
-							headers: {
-								"Content-Type": "application/json",
-							},
-							body: JSON.stringify({
-								contents: [
-									{
-										parts: [
-											{
-												text: prompt,
-											},
-										],
-									},
-								],
-							}),
-						},
-					);
-
-					if (!response.ok) {
-						const errorData = await response.json().catch(() => ({}));
-						const errorMessage =
-							errorData.error?.message || `API error: ${response.statusText}`;
-
-						// If model is overloaded, try next model or retry
-						if (
-							errorMessage.includes("overloaded") ||
-							errorMessage.includes("503") ||
-							response.status === 503
-						) {
-							lastError = new Error(errorMessage);
-							// Continue to next attempt or next model
-							continue;
-						}
-
-						// For other errors, throw immediately
-						throw new Error(errorMessage);
-					}
-
-					const data = await response.json();
-
-					// Extract text from response
-					summaryText =
-						data.candidates?.[0]?.content?.parts?.[0]?.text ||
-						"Unable to generate summary. Please try again.";
-
-					// Success! Break out of all loops
-					break;
-				} catch (error) {
-					lastError = error;
-					// If it's not an overload error, try next API version
-					if (
-						!error.message.includes("overloaded") &&
-						!error.message.includes("503")
-					) {
-						// For non-overload errors, try next API version
-						break;
-					}
-				}
-			}
-
-			// If we got a successful response, break out of API version loop
-			if (summaryText) {
-				break;
-			}
-		}
-
-		// If all models failed, throw the last error
-		if (!summaryText) {
-			throw (
-				lastError || new Error("All models failed. Please try again later.")
-			);
-		}
-
-		sendResponse({ text: summaryText });
-	} catch (error) {
-		console.error("Error in summarize:", error);
-		sendResponse({
-			error:
-				error.message ||
-				"Failed to get summary. Please check your API key and try again.",
-		});
-	}
-}
+  // src/background.js
+  async function setupSidePanel() {
+    try {
+      await chrome.sidePanel?.setOptions?.({ path: "popup.html", enabled: true });
+      await chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
+    } catch (err) {
+      console.error("[YT Summarizer] side panel setup:", err);
+    }
+  }
+  chrome.runtime.onInstalled.addListener(setupSidePanel);
+  chrome.runtime.onStartup.addListener(setupSidePanel);
+  async function setSessionState(state) {
+    try {
+      await chrome.storage.session.set({ [SESSION_KEY]: state });
+    } catch (e) {
+      console.error("[YT Summarizer] session set:", e);
+    }
+    try {
+      chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state }, () => {
+        void chrome.runtime?.lastError;
+      });
+    } catch (_) {
+    }
+  }
+  async function getSessionState() {
+    try {
+      const r = await chrome.storage.session.get([SESSION_KEY]);
+      return r?.[SESSION_KEY] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  var YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
+  var activeRequests = /* @__PURE__ */ new Map();
+  function cancelRequest(videoId) {
+    const controller = videoId && activeRequests.get(videoId);
+    if (controller) {
+      controller.abort();
+      activeRequests.delete(videoId);
+    }
+  }
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (sender.id !== chrome.runtime.id) return false;
+    switch (message?.type) {
+      case MSG.GENERATE_SUMMARY:
+        handleGenerate(message, sender, sendResponse);
+        return true;
+      // async response
+      case MSG.CANCEL_SUMMARY:
+        cancelRequest(message.videoId);
+        sendResponse?.({ ok: true });
+        return false;
+      case MSG.PUBLISH_SUMMARY:
+        setSessionState(message.payload);
+        sendResponse?.({ ok: true });
+        return false;
+      case MSG.OPEN_SIDE_PANEL:
+        openSidePanel(sender).then((opened) => sendResponse({ ok: true, opened }));
+        return true;
+      // async response
+      case MSG.SUMMARY_STATE_REQUEST:
+        getSessionState().then((state) => sendResponse({ ok: true, state }));
+        return true;
+      // async response
+      default:
+        return false;
+    }
+  });
+  async function handleGenerate(message, sender, sendResponse) {
+    try {
+      if (message.videoUrl && !YOUTUBE_DOMAIN_RE.test(message.videoUrl)) {
+        sendResponse({ ok: false, error: "Invalid video URL." });
+        return;
+      }
+      const { geminiApiKey } = await storageGet(["geminiApiKey"]);
+      if (!geminiApiKey) {
+        sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+        return;
+      }
+      const mode = message.transcript?.trim() ? "transcript" : "video";
+      const body = buildRequestBody({
+        mode,
+        title: message.title,
+        transcript: message.transcript,
+        videoUrl: message.videoUrl
+      });
+      const tabId = sender?.tab?.id;
+      const { target, token, videoId } = message;
+      const controller = new AbortController();
+      if (videoId) activeRequests.set(videoId, controller);
+      let finalText = "";
+      try {
+        finalText = await callGeminiStreaming({
+          apiKey: geminiApiKey,
+          model: GEMINI_MODEL,
+          body,
+          signal: controller.signal,
+          onChunk: (accumulated) => {
+            if (tabId != null) {
+              chrome.tabs.sendMessage(
+                tabId,
+                { type: MSG.SUMMARY_PROGRESS, text: accumulated, mode, target, token },
+                () => {
+                  void chrome.runtime?.lastError;
+                }
+              );
+            }
+          }
+        });
+      } catch (e) {
+        if (controller.signal.aborted || e?.name === "AbortError") {
+          sendResponse({ ok: false, cancelled: true });
+          return;
+        }
+        sendResponse({ ok: false, error: e?.message || "Failed to summarize." });
+        return;
+      } finally {
+        if (videoId) activeRequests.delete(videoId);
+      }
+      if (!finalText) {
+        sendResponse({ ok: false, error: "Gemini returned no summary (response may have been blocked)." });
+        return;
+      }
+      sendResponse({ ok: true, text: finalText, mode });
+    } catch (e) {
+      sendResponse({ ok: false, error: e?.message || "Unexpected error generating summary." });
+    }
+  }
+  async function openSidePanel(sender) {
+    try {
+      const opts = {};
+      if (sender?.tab?.windowId != null) opts.windowId = sender.tab.windowId;
+      else if (sender?.tab?.id != null) opts.tabId = sender.tab.id;
+      await chrome.sidePanel?.open?.(opts);
+      return true;
+    } catch (e) {
+      console.debug("[YT Summarizer] sidePanel.open skipped:", e?.message || e);
+      return false;
+    }
+  }
+})();

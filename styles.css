@@ -44,377 +44,43 @@
   cursor: not-allowed;
 }
 
-/* Modal Styles */
-.yt-sum-modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: rgba(0, 0, 0, 0.7);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 10000;
-  animation: fadeIn 0.2s ease;
+/* Page toast shown when the side panel couldn't auto-open. */
+.yt-sum-toast {
+  position: fixed !important;
+  bottom: 24px !important;
+  right: 24px !important;
+  z-index: 100000 !important;
+  max-width: 320px !important;
+  background: #323232 !important;
+  color: #fff !important;
+  padding: 14px 18px !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  line-height: 1.4 !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3) !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+  opacity: 1 !important;
+  transition: opacity 0.4s ease !important;
+}
+.yt-sum-toast.yt-sum-toast-hide {
+  opacity: 0 !important;
 }
 
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+/* Watch-page button: a touch larger and block-level under the title. */
+.yt-sum-summarize-btn.yt-sum-watch-btn {
+  margin: 12px 0 4px !important;
+  padding: 10px 18px !important;
+  font-size: 14px !important;
 }
 
-.yt-sum-modal-content {
-  background: white;
-  border-radius: 16px;
-  width: 95%;
-  max-width: 900px;
-  max-height: 90vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
-  animation: slideUp 0.3s ease;
-  overflow: hidden;
+/* Compact button for tile rails (watch-page related: yt-lockup-view-model,
+   and the legacy ytd-compact-video-renderer). */
+.yt-sum-compact-btn {
+  padding: 3px 8px !important;
+  font-size: 11px !important;
+  margin: 4px 0 2px !important;
 }
 
-@keyframes slideUp {
-  from {
-    transform: translateY(20px);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
+yt-lockup-view-model .yt-sum-summarize-btn {
+  margin: 4px 0 !important;
 }
-
-.yt-sum-modal-header {
-  padding: 24px 28px;
-  border-bottom: 1px solid #e0e0e0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-shrink: 0;
-  background: #fafafa;
-  border-radius: 16px 16px 0 0;
-}
-
-.yt-sum-modal-header h3 {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 600;
-  color: #333;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  flex: 1;
-  padding-right: 16px;
-  word-wrap: break-word;
-}
-
-.yt-sum-close-btn {
-  background: #f0f0f0;
-  border: none;
-  font-size: 24px;
-  color: #666;
-  cursor: pointer;
-  padding: 0;
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  transition: all 0.2s ease;
-  line-height: 1;
-  flex-shrink: 0;
-  font-weight: 300;
-}
-
-.yt-sum-close-btn:hover {
-  background-color: #e0e0e0;
-  color: #333;
-  transform: scale(1.1);
-}
-
-.yt-sum-close-btn:active {
-  transform: scale(0.95);
-}
-
-.yt-sum-modal-body {
-  padding: 28px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-  line-height: 1.8;
-  color: #333;
-  flex: 1;
-  min-height: 0;
-  font-size: 18px;
-}
-
-.yt-sum-modal-body h1,
-.yt-sum-modal-body h2,
-.yt-sum-modal-body h3,
-.yt-sum-modal-body h4,
-.yt-sum-modal-body h5,
-.yt-sum-modal-body h6 {
-  margin-top: 24px;
-  margin-bottom: 16px;
-  color: #1a1a1a;
-  font-weight: 600;
-}
-
-.yt-sum-modal-body h1 {
-  font-size: 28px;
-  border-bottom: 2px solid #e0e0e0;
-  padding-bottom: 8px;
-}
-
-.yt-sum-modal-body h2 {
-  font-size: 24px;
-}
-
-.yt-sum-modal-body h3 {
-  font-size: 20px;
-}
-
-.yt-sum-modal-body h4 {
-  font-size: 18px;
-}
-
-.yt-sum-modal-body h1:first-child,
-.yt-sum-modal-body h2:first-child,
-.yt-sum-modal-body h3:first-child {
-  margin-top: 0;
-}
-
-.yt-sum-modal-body p {
-  margin: 16px 0;
-  font-size: 18px;
-}
-
-.yt-sum-modal-body ul,
-.yt-sum-modal-body ol {
-  margin: 16px 0;
-  padding-left: 32px;
-  font-size: 18px;
-}
-
-.yt-sum-modal-body li {
-  margin: 10px 0;
-  line-height: 1.8;
-}
-
-.yt-sum-modal-body strong,
-.yt-sum-modal-body b {
-  font-weight: 600;
-  color: #1a1a1a;
-}
-
-.yt-sum-modal-body em,
-.yt-sum-modal-body i {
-  font-style: italic;
-}
-
-.yt-sum-modal-body code {
-  background-color: #f5f5f5;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 16px;
-}
-
-.yt-sum-modal-body pre {
-  background-color: #f5f5f5;
-  padding: 16px;
-  border-radius: 8px;
-  overflow-x: auto;
-  margin: 16px 0;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 16px;
-  line-height: 1.6;
-}
-
-.yt-sum-modal-body a {
-  color: #1976d2;
-  text-decoration: none;
-}
-
-.yt-sum-modal-body a:hover {
-  text-decoration: underline;
-}
-
-/* Dark mode styles for modal */
-.yt-sum-modal.dark-mode .yt-sum-modal-content {
-  background: #1e1e1e;
-  color: #e0e0e0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-header {
-  background: #2d2d2d;
-  border-bottom: 1px solid #444;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-header h3 {
-  color: #e0e0e0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-close-btn {
-  background: #3d3d3d;
-  color: #b0b0b0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-close-btn:hover {
-  background-color: #4d4d4d;
-  color: #e0e0e0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-body {
-  background: #1e1e1e;
-  color: #e0e0e0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-body h1,
-.yt-sum-modal.dark-mode .yt-sum-modal-body h2,
-.yt-sum-modal.dark-mode .yt-sum-modal-body h3,
-.yt-sum-modal.dark-mode .yt-sum-modal-body h4,
-.yt-sum-modal.dark-mode .yt-sum-modal-body h5,
-.yt-sum-modal.dark-mode .yt-sum-modal-body h6 {
-  color: #e0e0e0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-body h1 {
-  border-bottom: 2px solid #444;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-body strong,
-.yt-sum-modal.dark-mode .yt-sum-modal-body b {
-  color: #e0e0e0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-body code {
-  background-color: #2d2d2d;
-  color: #e0e0e0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-body pre {
-  background-color: #2d2d2d;
-  color: #e0e0e0;
-  border: 1px solid #444;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-modal-body a {
-  color: #64b5f6;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-loading-text {
-  color: #b0b0b0;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-bounce-dot {
-  background-color: #64b5f6;
-}
-
-.yt-sum-modal.dark-mode .yt-sum-error {
-  background-color: #3d1f1f;
-  color: #e57373;
-  border-left-color: #c62828;
-}
-
-/* Loading styles */
-.yt-sum-loading-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 200px;
-  padding: 40px 20px;
-}
-
-.yt-sum-loading-text {
-  margin-top: 20px;
-  color: #666;
-  font-size: 16px;
-}
-
-.yt-sum-streaming-loader {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-}
-
-.yt-sum-bounce-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background-color: #667eea;
-  animation: bounce 1.4s infinite ease-in-out both;
-}
-
-.yt-sum-bounce-dot:nth-child(1) {
-  animation-delay: -0.32s;
-}
-
-.yt-sum-bounce-dot:nth-child(2) {
-  animation-delay: -0.16s;
-}
-
-.yt-sum-bounce-dot:nth-child(3) {
-  animation-delay: 0;
-}
-
-@keyframes bounce {
-  0%, 80%, 100% {
-    transform: scale(0);
-    opacity: 0.5;
-  }
-  40% {
-    transform: scale(1);
-    opacity: 1;
-  }
-}
-
-.yt-sum-error {
-  color: #c62828;
-  background-color: #ffebee;
-  padding: 12px;
-  border-radius: 6px;
-  border-left: 4px solid #c62828;
-}
-
-.yt-sum-error-modal .yt-sum-modal-content {
-  border: 2px solid #c62828;
-}
-
-/* Prevent body scrolling when modal is open */
-body.yt-sum-modal-open {
-  overflow: hidden !important;
-  position: fixed;
-  width: 100%;
-}
-
-/* Scrollbar styling */
-.yt-sum-modal-body::-webkit-scrollbar {
-  width: 10px;
-}
-
-.yt-sum-modal-body::-webkit-scrollbar-track {
-  background: #f5f5f5;
-  border-radius: 5px;
-  margin: 8px 0;
-}
-
-.yt-sum-modal-body::-webkit-scrollbar-thumb {
-  background: #ccc;
-  border-radius: 5px;
-  border: 2px solid #f5f5f5;
-}
-
-.yt-sum-modal-body::-webkit-scrollbar-thumb:hover {
-  background: #999;
-}
-
