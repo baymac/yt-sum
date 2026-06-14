@@ -5,55 +5,55 @@
 A Chrome extension (Manifest V3) that summarizes YouTube videos from their **full
 transcript** using Google's Gemini API — so you can read the summary instead of watching.
 
-- 📝 A **Summarize** button on every video on the home feed → opens a modal with the full summary.
-- 🎬 A **Summarize in sidebar** button on the watch page → the summary renders in Chrome's side panel while you keep the video on screen.
-- 🧠 Summaries are built from the actual transcript. When a video's captions are unavailable (YouTube pot-token gating, or no captions at all), it **falls back to Gemini's native video understanding** so a normal public video never just fails.
-- 🔒 Your API key lives in the background service worker and is never exposed to the page.
-- 🌙 Dark mode, markdown rendering, XSS-safe output.
+## Features
 
-## How it works
+- **📝 Summarize button on every video** — home feed tiles, watch-page related videos, and
+  the watch page itself. One click summarizes that video.
+- **Everything in the side panel.** Summaries render in Chrome's side panel, so you can keep
+  the video on screen while you read. (There's also a **Summarize current video** button
+  inside the panel.)
+- **Transcript-first, with a fallback.** Summaries are built from the real transcript. When
+  captions are unavailable (YouTube pot-token gating, or no captions at all), it falls back
+  to Gemini's native video understanding, so a normal public video never just fails.
+- **Streaming output.** The summary streams in token-by-token instead of waiting for the full
+  response.
+- **Safe by default.** Your API key lives in the background service worker and never reaches
+  the page. Rendered text is HTML-escaped; links are protocol-sanitized. Dark mode included.
 
-```
- click Summarize (home)            open / Summarize on a watch page
-        │                                      │
-        ▼                                      ▼
- content script: fetchTranscript(videoId)  (same-origin, your logged-in session)
-   1. GET youtube.com/watch?v=ID  →  parse ytInitialPlayerResponse
-   2. pick caption track (manual > asr, your language)
-   3. baseUrl has &exp=xpe (pot-gated)? ─ yes ─┐   200+empty body? ─ yes ─┐
-   4. else GET baseUrl&fmt=json3 → transcript  │                         │
-        │ transcript text                       │ no transcript            │
-        ▼                                        ▼                         ▼
- background service worker (holds the Gemini key)
-   transcript present → Gemini generateContent (transcript in prompt)
-   no transcript      → Gemini generateContent (fileData.fileUri = video URL)
-        │
-        ▼
- render: modal (home)   or   side panel summary (watch page)
-```
-
-Model: `gemini-2.5-flash` (v1beta `generateContent`). The transcript path is cheap and
+Model: `gemini-2.5-flash` (v1beta `streamGenerateContent`). The transcript path is cheap and
 fast; the video-understanding fallback is the reliability backstop. Private/members-only
 videos with no captions are the one case neither path can reach — the extension says so
 clearly instead of guessing.
 
-## Install (load unpacked)
+## Setup (load unpacked)
 
-1. `npm install && npm run build && npm run icons` (produces the bundled `content.js`,
-   `background.js`, `popup.js` and the icon PNGs).
-2. Open `chrome://extensions/`, enable **Developer mode**, click **Load unpacked**, and
-   select this folder.
-3. Click the extension icon to open the side panel, open **⚙️ Settings**, paste your
-   **Gemini API key** ([get one free at Google AI Studio](https://aistudio.google.com/app/apikey)),
-   and Save.
+Requires **Chrome 114+** (side panel API) and **Node 18+**.
 
-Requires **Chrome 114+** (side panel API).
+1. Build the extension:
+
+   ```bash
+   npm install
+   npm run build && npm run icons
+   ```
+
+   This produces the bundled `content.js`, `background.js`, `popup.js`, and the icon PNGs.
+
+2. Load it into Chrome:
+   - Open `chrome://extensions/`
+   - Enable **Developer mode** (top right)
+   - Click **Load unpacked** and select this folder
+
+3. Add your Gemini key:
+   - Click the extension icon to open the side panel
+   - Open **⚙️ Settings**, paste your **Gemini API key**
+     ([get one free at Google AI Studio](https://aistudio.google.com/app/apikey)), and Save
 
 ## Usage
 
-- **Home feed:** click **📝 Summarize** on any video → a modal shows the summary.
-- **Watch page:** click **📝 Summarize in sidebar** under the title, or open the side
-  panel and click **Summarize current video** → the summary appears in the side panel.
+- **Any video tile** (home feed or related videos): click **📝 Summarize** → the summary
+  opens in the side panel.
+- **Watch page:** click **📝 Summarize** under the title, or open the side panel and click
+  **Summarize current video**.
 
 ## Development
 
@@ -71,11 +71,10 @@ in `src/lib/`:
 
 | File | Responsibility |
 |------|----------------|
-| `lib/transcript.js` | watch-page parse, caption-track pick, pot-gate detection, json3 parse |
-| `lib/summarize.js`  | Gemini request (both modes), retry/backoff, response parse |
-| `lib/youtube-dom.js`| video-id extraction, title strategies, button insertion |
-| `lib/markdown.js`   | markdown → safe HTML, URL sanitization |
-| `lib/modal.js`      | in-page summary modal |
+| `lib/transcript.js`  | watch-page parse, caption-track pick, pot-gate detection, json3 parse |
+| `lib/summarize.js`   | Gemini request (transcript + video-understanding modes), streaming, retry/backoff |
+| `lib/youtube-dom.js` | video-id extraction, title strategies, button insertion |
+| `lib/markdown.js`    | markdown → safe HTML, URL sanitization |
 | `lib/storage.js` / `lib/messages.js` | storage wrappers / message protocol |
 
 ### Testing against your real YouTube session
@@ -88,18 +87,17 @@ node tests/e2e/import-brave-cookies.mjs   # exports Brave's youtube.com cookies 
 npm run e2e                               # now runs logged in
 ```
 
-Cookies are written to `.context/youtube-cookies.json`, which is gitignored. It holds
-live session credentials — delete it when you're done (`rm .context/youtube-cookies.json`).
-The core injection/modal e2e tests use the search-results page and pass without it; only the
-"logged-in home feed" test needs a session (it skips when absent).
+Cookies are written to `.context/youtube-cookies.json` (gitignored). It holds live session
+credentials — delete it when you're done (`rm .context/youtube-cookies.json`). The core
+injection e2e tests use the search-results page and pass without it; only the "logged-in home
+feed" test needs a session (it skips when absent).
 
 ## Free alternative — `/yt-summarize` for Claude Code
 
 Don't want to use a paid Gemini key? `.claude/commands/yt-summarize.md` is a Claude Code
 slash command that fetches a video's transcript with the free
 [`youtube-transcript-api`](https://github.com/jdepoix/youtube-transcript-api) and has
-**Claude itself** summarize it — no API key, modeled on the
-[skills.sh youtube-summarizer skill](https://www.skills.sh/sickn33/antigravity-awesome-skills/youtube-summarizer).
+**Claude itself** summarize it — no API key.
 
 ```
 /yt-summarize https://www.youtube.com/watch?v=VIDEO_ID
@@ -111,21 +109,13 @@ To use it anywhere, copy it to your global commands dir:
 cp .claude/commands/yt-summarize.md ~/.claude/commands/
 ```
 
-It keeps the library in an isolated venv (so it works on PEP-668 "externally managed"
-Python) and handles both the library's old and new APIs. `scripts/yt-transcript.py` is the
-standalone extractor it uses.
+`scripts/yt-transcript.py` is the standalone extractor it uses (kept in an isolated venv, so
+it works on PEP-668 "externally managed" Python).
 
 ## Docs
 
-- [Architecture & API reference](docs/DOCUMENTATION.md) — component diagram, message protocol, module responsibilities
-- [Security model](docs/SECURITY.md) — XSS prevention, sanitizeUrl(), sender validation, API key isolation
-
-## Privacy & security
-
-- The API key is stored in Chrome sync storage and used only by the background service
-  worker — it never enters page or content-script context.
-- Transcript fetches are same-origin requests to youtube.com from your own session.
-- All rendered summary/title text is HTML-escaped; links are protocol-sanitized.
+- [Architecture](docs/DOCUMENTATION.md) — component diagram, summarization ladder, message protocol
+- [Security model](docs/SECURITY.md) — XSS prevention, URL sanitization, API key isolation
 
 ## License
 
