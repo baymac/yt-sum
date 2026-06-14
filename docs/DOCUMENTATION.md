@@ -7,9 +7,9 @@
 
 ```
 ┌── content script (src/content.js) ──────────── youtube.com, isolated world ──┐
-│  • injects Summarize buttons (home feed) and the watch-page button           │
+│  • injects Summarize buttons (home feed, related tiles, watch-page button)   │
 │  • fetches the transcript SAME-ORIGIN (carries the logged-in session)        │
-│  • renders the modal (home) / publishes to the side panel (watch)            │
+│  • publishes every result to the side panel (one surface — no in-page modal) │
 └───────────────────────────────────────────────────────────────────────────────┘
             │ GENERATE_SUMMARY {videoId, videoUrl, title, transcript|null}
             ▼
