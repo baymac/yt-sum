@@ -111,6 +111,129 @@ describe("background message hub", () => {
 		expect(resp).toBeUndefined();
 	});
 
+	it("CHAT_MESSAGE calls Gemini with the conversation history and returns text", async () => {
+		const { invoke } = await loadBackground();
+		const resp = await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q1" }],
+			context: { title: "T", summary: "S" },
+		});
+		expect(resp).toEqual({ ok: true, text: "SUMMARY" });
+		// The history is sent as Gemini `contents` (role + parts[].text).
+		const sentBody = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
+		expect(sentBody.contents).toEqual([{ role: "user", parts: [{ text: "Q1" }] }]);
+		expect(sentBody.generationConfig.maxOutputTokens).toBe(4096);
+	});
+
+	it("CHAT_MESSAGE maps a multi-turn history into Gemini contents in order", async () => {
+		const { invoke } = await loadBackground();
+		await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [
+				{ role: "user", text: "hidden transcript context" },
+				{ role: "model", text: "Got it." },
+				{ role: "user", text: "real question" },
+			],
+			context: {},
+		});
+		const sentBody = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
+		expect(sentBody.contents.map((c) => c.role)).toEqual(["user", "model", "user"]);
+		expect(sentBody.contents[2].parts[0].text).toBe("real question");
+	});
+
+	it("CHAT_MESSAGE surfaces a missing API key", async () => {
+		const { invoke } = await loadBackground({});
+		const resp = await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: {},
+		});
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toMatch(/api key/i);
+	});
+
+	it("CHAT_MESSAGE rejects an empty history", async () => {
+		const { invoke } = await loadBackground();
+		const resp = await invoke({ type: MSG.CHAT_MESSAGE, history: [], context: {} });
+		expect(resp.ok).toBe(false);
+		expect(resp.error).toMatch(/no message/i);
+	});
+
+	it("CHAT_MESSAGE broadcasts streaming progress via CHAT_PROGRESS", async () => {
+		const { chrome, invoke } = await loadBackground();
+		await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: {},
+		});
+		const progress = chrome.runtime.sendMessage.mock.calls.find(
+			(c) => c[0]?.type === MSG.CHAT_PROGRESS,
+		);
+		expect(progress?.[0].text).toBe("SUMMARY");
+	});
+
+	it("CHAT_MESSAGE reports a network failure as an error", async () => {
+		// A network error is transient, so callGeminiStreaming retries 3x with a
+		// 1s + 2s real backoff. Fake timers flush that instantly — we still
+		// exercise the retry-then-fail path without paying 3s of wall clock.
+		globalThis.fetch = vi.fn(async () => {
+			throw new Error("network down");
+		});
+		const { invoke } = await loadBackground();
+		vi.useFakeTimers();
+		try {
+			const p = invoke({
+				type: MSG.CHAT_MESSAGE,
+				history: [{ role: "user", text: "Q" }],
+				context: {},
+			});
+			await vi.runAllTimersAsync();
+			const resp = await p;
+			expect(resp.ok).toBe(false);
+			expect(resp.error).toBeTruthy();
+			// All 3 attempts ran (proves the retry loop executed, not a single shot).
+			expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("CHAT_STOP aborts an in-flight chat request and reports cancelled", async () => {
+		// A fetch that never resolves until aborted, so we can drive the abort path.
+		globalThis.fetch = vi.fn(
+			(url, opts) =>
+				new Promise((_resolve, reject) => {
+					opts.signal.addEventListener("abort", () => {
+						const err = new Error("aborted");
+						err.name = "AbortError";
+						reject(err);
+					});
+				}),
+		);
+		const { invoke } = await loadBackground();
+
+		let chatResp;
+		const chatPromise = invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: {},
+		}).then((r) => (chatResp = r));
+
+		// Let handleChat install activeChatController before stopping.
+		await new Promise((r) => setTimeout(r, 0));
+		const stopResp = await invoke({ type: MSG.CHAT_STOP });
+		expect(stopResp).toEqual({ ok: true });
+
+		await chatPromise;
+		expect(chatResp).toEqual({ ok: false, cancelled: true });
+	});
+
+	it("CHAT_STOP with no active chat still responds ok", async () => {
+		const { invoke } = await loadBackground();
+		const resp = await invoke({ type: MSG.CHAT_STOP });
+		expect(resp).toEqual({ ok: true });
+	});
+
 	it("setupSidePanel catches errors from sidePanel.setOptions without crashing", async () => {
 		vi.resetModules();
 		const chrome = makeChrome();
