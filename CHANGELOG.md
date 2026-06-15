@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.2.0.0] - 2026-06-16
+
+### Added
+- Chat copilot in the side panel: ask follow-up questions about the video and get streaming answers, with a Stop button to interrupt a reply mid-stream. The transcript is used as context automatically, so you can start asking before (or instead of) generating a summary.
+- Watch pages now fetch the transcript automatically in the background, so the side panel is ready the moment you open it. No Gemini quota is spent until you click Summarize or send a chat message.
+- Copy buttons on chat replies and on the transcript prompt for one-click copy to the clipboard.
+
+### Changed
+- Opening Settings now preserves the video title and the chat layout, and restores both when you go back.
+- The chat box is focused automatically when a video is ready and is labeled for screen readers; chat error messages are announced to assistive tech.
+
+### Fixed
+- The side-panel script (`popup.js`) now ships as readable text instead of being flagged as a binary file, so its diffs are reviewable. This was caused by raw control bytes in the markdown URL sanitizer, now written as escape sequences (same behavior: `javascript:`/`data:` and control-character URLs are still rejected).
+
 ## [2.1.0.0] - 2026-06-05
 
 ### Added

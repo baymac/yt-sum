@@ -158,11 +158,15 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     OPEN_SIDE_PANEL: "OPEN_SIDE_PANEL",
     SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR",
     SUMMARY_PROGRESS: "SUMMARY_PROGRESS",
-    CANCEL_SUMMARY: "CANCEL_SUMMARY"
+    CANCEL_SUMMARY: "CANCEL_SUMMARY",
+    CHAT_MESSAGE: "CHAT_MESSAGE",
+    CHAT_PROGRESS: "CHAT_PROGRESS",
+    CHAT_STOP: "CHAT_STOP"
   };
   var SESSION_KEY = "currentSummary";
 
   // src/background.js
+  var CHAT_GENERATION_CONFIG = { temperature: 0.5, maxOutputTokens: 4096 };
   async function setupSidePanel() {
     try {
       await chrome.sidePanel?.setOptions?.({ path: "popup.html", enabled: true });
@@ -196,6 +200,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
   }
   var YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
   var activeRequests = /* @__PURE__ */ new Map();
+  var activeChatController = null;
   function cancelRequest(videoId) {
     const controller = videoId && activeRequests.get(videoId);
     if (controller) {
@@ -226,6 +231,17 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         getSessionState().then((state) => sendResponse({ ok: true, state }));
         return true;
       // async response
+      case MSG.CHAT_MESSAGE:
+        handleChat(message, sender, sendResponse);
+        return true;
+      // async response
+      case MSG.CHAT_STOP:
+        if (activeChatController) {
+          activeChatController.abort();
+          activeChatController = null;
+        }
+        sendResponse?.({ ok: true });
+        return false;
       default:
         return false;
     }
@@ -288,6 +304,63 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       sendResponse({ ok: true, text: finalText, mode });
     } catch (e) {
       sendResponse({ ok: false, error: e?.message || "Unexpected error generating summary." });
+    }
+  }
+  function buildChatContents(history) {
+    return history.map((msg) => ({
+      role: msg.role,
+      parts: [{ text: msg.text }]
+    }));
+  }
+  async function handleChat(message, sender, sendResponse) {
+    try {
+      const { geminiApiKey } = await storageGet(["geminiApiKey"]);
+      if (!geminiApiKey) {
+        sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+        return;
+      }
+      const { history } = message;
+      if (!history?.length) {
+        sendResponse({ ok: false, error: "No message to send." });
+        return;
+      }
+      const contents = buildChatContents(history);
+      const body = {
+        contents,
+        generationConfig: CHAT_GENERATION_CONFIG
+      };
+      activeChatController = new AbortController();
+      const signal = activeChatController.signal;
+      try {
+        const finalText = await callGeminiStreaming({
+          apiKey: geminiApiKey,
+          model: GEMINI_MODEL,
+          body,
+          signal,
+          onChunk: (accumulated) => {
+            try {
+              chrome.runtime.sendMessage(
+                { type: MSG.CHAT_PROGRESS, text: accumulated },
+                () => {
+                  void chrome.runtime?.lastError;
+                }
+              );
+            } catch (_) {
+            }
+          }
+        });
+        sendResponse({ ok: true, text: finalText });
+      } catch (e) {
+        if (activeChatController?.signal.aborted || e?.name === "AbortError") {
+          sendResponse({ ok: false, cancelled: true });
+          return;
+        }
+        sendResponse({ ok: false, error: e?.message || "Chat failed." });
+      } finally {
+        activeChatController = null;
+      }
+    } catch (e) {
+      sendResponse({ ok: false, error: e?.message || "Unexpected chat error." });
     }
   }
   async function openSidePanel(sender) {

@@ -9,18 +9,23 @@
 ┌── content script (src/content.js) ──────────── youtube.com, isolated world ──┐
 │  • injects Summarize buttons (home feed, related tiles, watch-page button)   │
 │  • fetches the transcript SAME-ORIGIN (carries the logged-in session)        │
+│  • auto-fetches the transcript on watch pages (one fetch per videoId) so     │
+│    the panel is ready before any Gemini call — no quota spent until asked    │
 │  • publishes every result to the side panel (one surface — no in-page modal) │
 └───────────────────────────────────────────────────────────────────────────────┘
             │ GENERATE_SUMMARY {videoId, videoUrl, title, transcript|null}
+            │ CHAT_MESSAGE {videoId, prompt, transcript}
             ▼
 ┌── background service worker (src/background.js) ── holds the Gemini key ──────┐
 │  • calls Gemini (transcript-in-prompt, or fileData.fileUri fallback)         │
+│  • handleChat: streams chat answers (transcript seeded as hidden context)    │
 │  • side-panel pub/sub: storage.session + SUMMARY_READY broadcast             │
 └───────────────────────────────────────────────────────────────────────────────┘
-            │ SUMMARY_READY {state}
+            │ SUMMARY_READY {state} / CHAT_PROGRESS {chunk}
             ▼
 ┌── side panel (popup.html + src/popup.js) ────────────────────────────────────┐
 │  • Summary view (renders the watch-page result) + Settings (key, dark mode)  │
+│  • Chat copilot: ask follow-ups, streaming answers, Stop button (CHAT_STOP)  │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,6 +60,11 @@ path; the UI reports this honestly rather than hallucinating.
 | `SUMMARY_STATE_REQUEST` | panel → bg | restore last state on open |
 | `OPEN_SIDE_PANEL` | content → bg | best-effort `sidePanel.open` on user gesture |
 | `SUMMARIZE_IN_SIDEBAR` | panel → content | panel-initiated "Summarize current video" |
+| `SUMMARY_PROGRESS` | bg → panel | streaming summary chunks as they arrive |
+| `CANCEL_SUMMARY` | panel → bg | abort an in-flight summary request |
+| `CHAT_MESSAGE` | panel → bg | ask a follow-up; transcript seeded as hidden context |
+| `CHAT_PROGRESS` | bg → panel | streaming chat answer chunks |
+| `CHAT_STOP` | panel → bg | interrupt the current chat reply (Stop button) |
 
 ## Build & test
 
