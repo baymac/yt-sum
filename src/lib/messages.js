@@ -16,6 +16,9 @@ export const MSG = {
 	SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR",
 	SUMMARY_PROGRESS: "SUMMARY_PROGRESS",
 	CANCEL_SUMMARY: "CANCEL_SUMMARY",
+	CHAT_MESSAGE: "CHAT_MESSAGE",
+	CHAT_PROGRESS: "CHAT_PROGRESS",
+	CHAT_STOP: "CHAT_STOP",
 };
 
 // chrome.storage.session key holding the latest sidebar summary state:

@@ -7,8 +7,10 @@
 //   • Fetch the transcript here (same-origin, logged-in session) and hand it to
 //     the background SW, which holds the API key and calls Gemini.
 //
-// Invariant: summarizing is manual-only. Opening or SPA-navigating to a video
-// never auto-summarizes — only an explicit button click starts a run.
+// Auto-fetch: opening or SPA-navigating to a watch page automatically fetches the
+// transcript (auto:true) and stops at transcript_ready — it never spends Gemini
+// quota on its own. Producing the actual summary (and the video-mode fallback for
+// caption-less videos) still requires an explicit click.
 
 import { fetchTranscript, describeTranscriptFailure } from "./lib/transcript.js";
 import {
@@ -19,6 +21,14 @@ import {
 	insertButton,
 } from "./lib/youtube-dom.js";
 import { MSG } from "./lib/messages.js";
+import { clampTranscript } from "./lib/summarize.js";
+
+function cleanTranscript(text) {
+	return text
+		.replace(/\[(?:Music|Applause|Laughter|Inaudible)\]/gi, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
 
 const BTN_CLASS = "yt-sum-summarize-btn";
 const WATCH_BTN_ID = "yt-sum-watch-btn";
@@ -48,7 +58,7 @@ let currentSidebarJob = null;
 // Starts a summarize run rendered in the side panel. Returns { promise, cancel }:
 // `cancel` aborts the in-flight Gemini request (in the background SW) and, unless
 // quiet, resets the panel to idle.
-function summarizeVideo({ videoId, title }) {
+function summarizeVideo({ videoId, title, auto = false }) {
 	const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
 	// Settled once a result is rendered OR the run is cancelled. Guards against a
@@ -94,20 +104,36 @@ function summarizeVideo({ videoId, title }) {
 			return;
 		}
 
-		const transcript = tr.ok ? tr.text : null;
-
-		// Show early notice so the user knows why it's taking longer before any
-		// Gemini response arrives (video mode takes ~30s vs transcript mode ~2s).
-		if (!transcript) {
-			publish({ status: "streaming", text: "Captions were unavailable — Gemini is watching the video…" });
+		if (tr.ok) {
+			settled = true;
+			publish({
+				status: "transcript_ready",
+				videoId,
+				title: resolvedTitle,
+				transcript: clampTranscript(cleanTranscript(tr.text)),
+			});
+			return;
 		}
+
+		// Auto-fetch only fetches the transcript — it must never spend Gemini
+		// video-mode quota without an explicit click. Surface the failure quietly so
+		// the user can still click 📝 Summarize to run the video-mode fallback.
+		if (auto) {
+			settled = true;
+			publish({ status: "error", videoId, title: resolvedTitle, error: describeTranscriptFailure(tr.reason) });
+			return;
+		}
+
+		// No transcript — video mode. Show early notice so the user knows why it's
+		// taking longer (video mode takes ~30s vs transcript mode ~2s).
+		publish({ status: "streaming", text: "Captions were unavailable — Gemini is watching the video…" });
 
 		const resp = await sendMessage({
 			type: MSG.GENERATE_SUMMARY,
 			videoId,
 			videoUrl,
 			title: resolvedTitle,
-			transcript,
+			transcript: null,
 			target: "sidebar",
 		});
 
@@ -221,6 +247,32 @@ function addFeedButtons() {
 	return added;
 }
 
+// Best-effort title for the current watch page (DOM first, document.title fallback).
+function getWatchTitle() {
+	return (
+		document.querySelector("ytd-watch-metadata #title yt-formatted-string, h1.ytd-watch-metadata")?.textContent?.trim() ||
+		document.title.replace(/\s*-\s*YouTube\s*$/, "").trim()
+	);
+}
+
+// The watch video we've already auto-fetched a transcript for, so the repeated
+// scans (mutation observer + URL poll) only kick off one auto-fetch per video.
+let lastAutoVideoId = null;
+
+// On load / SPA-navigation to a watch page, automatically fetch the transcript so
+// the side panel is ready the moment it opens. auto:true means transcript-only —
+// no Gemini call until the user clicks Summarize.
+function maybeAutoSummarize() {
+	const videoId = getWatchVideoId(location.href);
+	if (!videoId) {
+		lastAutoVideoId = null;
+		return;
+	}
+	if (videoId === lastAutoVideoId) return;
+	lastAutoVideoId = videoId;
+	summarizeVideo({ videoId, title: getWatchTitle(), auto: true });
+}
+
 function addWatchButton() {
 	const videoId = getWatchVideoId(location.href);
 	const existing = document.getElementById(WATCH_BTN_ID);
@@ -244,9 +296,7 @@ function addWatchButton() {
 	);
 	if (!titleEl) return;
 
-	const title =
-		document.querySelector("ytd-watch-metadata #title yt-formatted-string, h1.ytd-watch-metadata")?.textContent?.trim() ||
-		document.title.replace(/\s*-\s*YouTube\s*$/, "").trim();
+	const title = getWatchTitle();
 
 	const button = makeButton({
 		label: "📝 Summarize",
@@ -263,6 +313,7 @@ function scanAndInject() {
 	try {
 		addFeedButtons();
 		addWatchButton();
+		maybeAutoSummarize();
 	} catch (e) {
 		console.error("[YT Summarizer] inject error:", e);
 	}

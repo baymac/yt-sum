@@ -402,10 +402,26 @@
     OPEN_SIDE_PANEL: "OPEN_SIDE_PANEL",
     SUMMARIZE_IN_SIDEBAR: "SUMMARIZE_IN_SIDEBAR",
     SUMMARY_PROGRESS: "SUMMARY_PROGRESS",
-    CANCEL_SUMMARY: "CANCEL_SUMMARY"
+    CANCEL_SUMMARY: "CANCEL_SUMMARY",
+    CHAT_MESSAGE: "CHAT_MESSAGE",
+    CHAT_PROGRESS: "CHAT_PROGRESS",
+    CHAT_STOP: "CHAT_STOP"
   };
 
+  // src/lib/summarize.js
+  var MAX_TRANSCRIPT_CHARS = 2e5;
+  function clampTranscript(text, max = MAX_TRANSCRIPT_CHARS) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return `${text.slice(0, max)}
+
+[transcript truncated for length]`;
+  }
+
   // src/content.js
+  function cleanTranscript(text) {
+    return text.replace(/\[(?:Music|Applause|Laughter|Inaudible)\]/gi, "").replace(/\s+/g, " ").trim();
+  }
   var BTN_CLASS = "yt-sum-summarize-btn";
   var WATCH_BTN_ID = "yt-sum-watch-btn";
   var LOADING_CLASS = "yt-sum-loading";
@@ -422,7 +438,7 @@
     });
   }
   var currentSidebarJob = null;
-  function summarizeVideo({ videoId, title }) {
+  function summarizeVideo({ videoId, title, auto = false }) {
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     let settled = false;
     const cancel = ({ quiet = false } = {}) => {
@@ -448,16 +464,28 @@
         emit({ ok: false, error: describeTranscriptFailure(tr.reason) }, ctx);
         return;
       }
-      const transcript = tr.ok ? tr.text : null;
-      if (!transcript) {
-        publish({ status: "streaming", text: "Captions were unavailable \u2014 Gemini is watching the video\u2026" });
+      if (tr.ok) {
+        settled = true;
+        publish({
+          status: "transcript_ready",
+          videoId,
+          title: resolvedTitle,
+          transcript: clampTranscript(cleanTranscript(tr.text))
+        });
+        return;
       }
+      if (auto) {
+        settled = true;
+        publish({ status: "error", videoId, title: resolvedTitle, error: describeTranscriptFailure(tr.reason) });
+        return;
+      }
+      publish({ status: "streaming", text: "Captions were unavailable \u2014 Gemini is watching the video\u2026" });
       const resp = await sendMessage({
         type: MSG.GENERATE_SUMMARY,
         videoId,
         videoUrl,
         title: resolvedTitle,
-        transcript,
+        transcript: null,
         target: "sidebar"
       });
       if (settled || resp?.cancelled) return;
@@ -545,6 +573,20 @@
     }
     return added;
   }
+  function getWatchTitle() {
+    return document.querySelector("ytd-watch-metadata #title yt-formatted-string, h1.ytd-watch-metadata")?.textContent?.trim() || document.title.replace(/\s*-\s*YouTube\s*$/, "").trim();
+  }
+  var lastAutoVideoId = null;
+  function maybeAutoSummarize() {
+    const videoId = getWatchVideoId(location.href);
+    if (!videoId) {
+      lastAutoVideoId = null;
+      return;
+    }
+    if (videoId === lastAutoVideoId) return;
+    lastAutoVideoId = videoId;
+    summarizeVideo({ videoId, title: getWatchTitle(), auto: true });
+  }
   function addWatchButton() {
     const videoId = getWatchVideoId(location.href);
     const existing = document.getElementById(WATCH_BTN_ID);
@@ -560,7 +602,7 @@
       "ytd-watch-metadata #title, #above-the-fold #title, h1.ytd-watch-metadata"
     );
     if (!titleEl) return;
-    const title = document.querySelector("ytd-watch-metadata #title yt-formatted-string, h1.ytd-watch-metadata")?.textContent?.trim() || document.title.replace(/\s*-\s*YouTube\s*$/, "").trim();
+    const title = getWatchTitle();
     const button = makeButton({
       label: "\u{1F4DD} Summarize",
       title: "Summarize this video in the side panel",
@@ -575,6 +617,7 @@
     try {
       addFeedButtons();
       addWatchButton();
+      maybeAutoSummarize();
     } catch (e) {
       console.error("[YT Summarizer] inject error:", e);
     }

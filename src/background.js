@@ -5,6 +5,10 @@ import { callGeminiStreaming, buildRequestBody, GEMINI_MODEL } from "./lib/summa
 import { storageGet } from "./lib/storage.js";
 import { MSG, SESSION_KEY } from "./lib/messages.js";
 
+// Chat is tuned hotter and shorter than the summarize path (which uses 0.3 /
+// 8192): a touch more conversational, capped so a single answer stays snappy.
+const CHAT_GENERATION_CONFIG = { temperature: 0.5, maxOutputTokens: 4096 };
+
 // ── Side panel wiring ────────────────────────────────────────────────────────
 
 async function setupSidePanel() {
@@ -56,6 +60,9 @@ const YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\/
 // (modal close, watch button, side-panel) can abort the actual network call.
 const activeRequests = new Map();
 
+// Single in-flight chat request (panel enforces one-at-a-time via UI state).
+let activeChatController = null;
+
 function cancelRequest(videoId) {
 	const controller = videoId && activeRequests.get(videoId);
 	if (controller) {
@@ -90,6 +97,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 		case MSG.SUMMARY_STATE_REQUEST:
 			getSessionState().then((state) => sendResponse({ ok: true, state }));
 			return true; // async response
+
+		case MSG.CHAT_MESSAGE:
+			handleChat(message, sender, sendResponse);
+			return true; // async response
+
+		case MSG.CHAT_STOP:
+			if (activeChatController) {
+				activeChatController.abort();
+				activeChatController = null;
+			}
+			sendResponse?.({ ok: true });
+			return false;
 
 		default:
 			return false;
@@ -160,6 +179,68 @@ async function handleGenerate(message, sender, sendResponse) {
 		sendResponse({ ok: true, text: finalText, mode });
 	} catch (e) {
 		sendResponse({ ok: false, error: e?.message || "Unexpected error generating summary." });
+	}
+}
+
+// The transcript/summary context is already woven into `history` by the panel
+// (a hidden seed turn), so the wire just maps each turn to a Gemini content.
+function buildChatContents(history) {
+	return history.map(msg => ({
+		role: msg.role,
+		parts: [{ text: msg.text }],
+	}));
+}
+
+async function handleChat(message, sender, sendResponse) {
+	try {
+		const { geminiApiKey } = await storageGet(["geminiApiKey"]);
+		if (!geminiApiKey) {
+			sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+			return;
+		}
+
+		const { history } = message;
+		if (!history?.length) {
+			sendResponse({ ok: false, error: "No message to send." });
+			return;
+		}
+
+		const contents = buildChatContents(history);
+		const body = {
+			contents,
+			generationConfig: CHAT_GENERATION_CONFIG,
+		};
+
+		activeChatController = new AbortController();
+		const signal = activeChatController.signal;
+
+		try {
+			const finalText = await callGeminiStreaming({
+				apiKey: geminiApiKey,
+				model: GEMINI_MODEL,
+				body,
+				signal,
+				onChunk: (accumulated) => {
+					try {
+						chrome.runtime.sendMessage(
+							{ type: MSG.CHAT_PROGRESS, text: accumulated },
+							() => { void chrome.runtime?.lastError; },
+						);
+					} catch (_) {}
+				},
+			});
+			sendResponse({ ok: true, text: finalText });
+		} catch (e) {
+			if (activeChatController?.signal.aborted || e?.name === "AbortError") {
+				sendResponse({ ok: false, cancelled: true });
+				return;
+			}
+			sendResponse({ ok: false, error: e?.message || "Chat failed." });
+		} finally {
+			activeChatController = null;
+		}
+	} catch (e) {
+		sendResponse({ ok: false, error: e?.message || "Unexpected chat error." });
 	}
 }
 
