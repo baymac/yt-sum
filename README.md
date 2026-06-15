@@ -12,6 +12,13 @@ transcript** using Google's Gemini API — so you can read the summary instead o
 - **Everything in the side panel.** Summaries render in Chrome's side panel, so you can keep
   the video on screen while you read. (There's also a **Summarize current video** button
   inside the panel.)
+- **Chat copilot.** Ask follow-up questions about the video right in the side panel and get
+  streaming answers, with a **Stop** button to interrupt a reply mid-stream. The transcript is
+  used as context automatically, so you can start asking before (or instead of) generating a
+  summary.
+- **Instant on watch pages.** Opening a watch page fetches the transcript in the background, so
+  the panel is ready the moment you open it. No Gemini quota is spent until you click Summarize
+  or send a chat message.
 - **Transcript-first, with a fallback.** Summaries are built from the real transcript. When
   captions are unavailable (YouTube pot-token gating, or no captions at all), it falls back
   to Gemini's native video understanding, so a normal public video never just fails.
@@ -54,6 +61,9 @@ Requires **Chrome 114+** (side panel API) and **Node 18+**.
   opens in the side panel.
 - **Watch page:** click **📝 Summarize** under the title, or open the side panel and click
   **Summarize current video**.
+- **Ask follow-ups:** on a watch page, type a question into the chat box at the bottom of the
+  side panel and press Enter. Answers stream in; click **Stop** to cut a reply short. You don't
+  need to summarize first — the transcript is already loaded as context.
 
 ## Development
 
