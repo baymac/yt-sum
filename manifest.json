@@ -1,17 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Video Summarizer",
-  "version": "2.0.0",
-  "description": "Summarize YouTube videos from their full transcript using Gemini, with a native video-understanding fallback. Modal on the home feed, summary in the side panel while watching.",
+  "name": "Page & Video Summarizer",
+  "version": "2.3.0.0",
+  "description": "Summarize the page you're on: YouTube videos from their transcript, any article or blog from its text — with a Gemini chat copilot in the side panel. Works on the focused tab and remembers each tab's chat.",
   "permissions": [
     "storage",
     "activeTab",
     "tabs",
+    "scripting",
     "sidePanel"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
-    "https://generativelanguage.googleapis.com/*"
+    "https://generativelanguage.googleapis.com/*",
+    "http://*/*",
+    "https://*/*"
   ],
   "content_scripts": [
     {
@@ -39,6 +42,15 @@
   },
   "side_panel": {
     "default_path": "popup.html"
+  },
+  "commands": {
+    "open_side_panel": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Open the Summarizer side panel"
+    }
   },
   "icons": {
     "16": "icons/icon16.png",

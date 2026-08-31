@@ -405,7 +405,8 @@
     CANCEL_SUMMARY: "CANCEL_SUMMARY",
     CHAT_MESSAGE: "CHAT_MESSAGE",
     CHAT_PROGRESS: "CHAT_PROGRESS",
-    CHAT_STOP: "CHAT_STOP"
+    CHAT_STOP: "CHAT_STOP",
+    SAVE_CHAT: "SAVE_CHAT"
   };
 
   // src/lib/summarize.js
@@ -452,7 +453,7 @@
     currentSidebarJob = job;
     const promise = (async () => {
       publish({ status: "loading", videoId, title });
-      const opened = await sendMessage({ type: MSG.OPEN_SIDE_PANEL });
+      const opened = auto ? null : await sendMessage({ type: MSG.OPEN_SIDE_PANEL });
       const panelOpened = opened?.opened === true;
       if (settled) return;
       const tr = await fetchTranscript(videoId);

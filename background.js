@@ -133,6 +133,40 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     throw new Error(`Gemini is busy right now. ${lastError}`);
   }
 
+  // src/lib/page.js
+  var MAX_PAGE_CHARS = 2e5;
+  function clampPageText(text, max = MAX_PAGE_CHARS) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return `${text.slice(0, max)}
+
+[content truncated for length]`;
+  }
+  function extractPageContent() {
+    const STRIP = 'script,style,noscript,template,nav,header,footer,aside,form,iframe,svg,button,select,[role="navigation"],[role="banner"],[role="contentinfo"],[aria-hidden="true"]';
+    const root = document.querySelector("article") || document.querySelector("main") || document.querySelector('[role="main"]') || document.body;
+    let text = "";
+    if (root) {
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll(STRIP).forEach((el) => el.remove());
+      text = (clone.innerText || clone.textContent || "").replace(/[ \t ]+/g, " ").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    }
+    const h1 = document.querySelector("h1");
+    const title = (h1 && (h1.innerText || h1.textContent) || "").replace(/\s+/g, " ").trim() || (document.title || "").replace(/\s+/g, " ").trim() || location.href;
+    return { title, text, url: location.href };
+  }
+
+  // src/lib/youtube-dom.js
+  function isWatchUrl(url) {
+    if (!url) return false;
+    try {
+      const u = new URL(url, "https://www.youtube.com");
+      return u.pathname === "/watch" && u.searchParams.has("v");
+    } catch (_) {
+      return /\/watch\?(?:.*&)?v=/.test(url);
+    }
+  }
+
   // src/lib/storage.js
   function storageGet(keys) {
     return new Promise((resolve) => {
@@ -161,9 +195,10 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     CANCEL_SUMMARY: "CANCEL_SUMMARY",
     CHAT_MESSAGE: "CHAT_MESSAGE",
     CHAT_PROGRESS: "CHAT_PROGRESS",
-    CHAT_STOP: "CHAT_STOP"
+    CHAT_STOP: "CHAT_STOP",
+    SAVE_CHAT: "SAVE_CHAT"
   };
-  var SESSION_KEY = "currentSummary";
+  var TAB_STATES_KEY = "tabStates";
 
   // src/background.js
   var CHAT_GENERATION_CONFIG = { temperature: 0.5, maxOutputTokens: 4096 };
@@ -172,17 +207,61 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       await chrome.sidePanel?.setOptions?.({ path: "popup.html", enabled: true });
       await chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
     } catch (err) {
-      console.error("[YT Summarizer] side panel setup:", err);
+      console.error("[Summarizer] side panel setup:", err);
     }
   }
   chrome.runtime.onInstalled.addListener(setupSidePanel);
   chrome.runtime.onStartup.addListener(setupSidePanel);
-  async function setSessionState(state) {
+  async function getAllTabStates() {
     try {
-      await chrome.storage.session.set({ [SESSION_KEY]: state });
-    } catch (e) {
-      console.error("[YT Summarizer] session set:", e);
+      const r = await chrome.storage.session.get([TAB_STATES_KEY]);
+      return r?.[TAB_STATES_KEY] || {};
+    } catch (_) {
+      return {};
     }
+  }
+  async function setAllTabStates(all) {
+    try {
+      await chrome.storage.session.set({ [TAB_STATES_KEY]: all });
+    } catch (e) {
+      console.error("[Summarizer] session set:", e);
+    }
+  }
+  async function getTabState(tabId) {
+    if (tabId == null) return null;
+    const all = await getAllTabStates();
+    return all[tabId] || null;
+  }
+  async function setTabState(tabId, state) {
+    if (tabId == null) return;
+    const all = await getAllTabStates();
+    all[tabId] = { ...state, tabId };
+    await setAllTabStates(all);
+  }
+  async function patchTabState(tabId, patch) {
+    if (tabId == null) return null;
+    const all = await getAllTabStates();
+    const next = { ...all[tabId] || {}, ...patch, tabId };
+    all[tabId] = next;
+    await setAllTabStates(all);
+    return next;
+  }
+  async function deleteTabState(tabId) {
+    const all = await getAllTabStates();
+    if (tabId in all) {
+      delete all[tabId];
+      await setAllTabStates(all);
+    }
+  }
+  async function getActiveTab() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      return tab || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function broadcast(state) {
     try {
       chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state }, () => {
         void chrome.runtime?.lastError;
@@ -190,12 +269,114 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     } catch (_) {
     }
   }
-  async function getSessionState() {
+  async function broadcastIfActive(tabId, state) {
+    const active = await getActiveTab();
+    if (active?.id === tabId) broadcast({ ...state, tabId });
+  }
+  function classify(url) {
+    if (!url || !/^https?:\/\//i.test(url)) return "unsupported";
+    if (isWatchUrl(url)) return "youtube";
+    if (/^https?:\/\/(?:[^/]*\.)?youtube\.com\//i.test(url) || /^https?:\/\/youtu\.be\//i.test(url))
+      return "youtube-other";
+    return "page";
+  }
+  async function ensureTabState(tab) {
+    if (!tab || tab.id == null) return;
+    const tabId = tab.id;
+    const url = tab.url || "";
+    const kind = classify(url);
+    const cached = await getTabState(tabId);
+    if (cached && cached.url === url && cached.status && cached.status !== "loading-page") {
+      broadcast({ ...cached, tabId });
+      return;
+    }
+    if (kind === "page") {
+      const loading = { tabId, url, kind, status: "loading-page", title: tab.title || url };
+      await setTabState(tabId, loading);
+      await broadcastIfActive(tabId, loading);
+      if (tab.status && tab.status !== "complete") return;
+      const extracted = await extractPage(tabId);
+      let next;
+      if (extracted && extracted.text && extracted.text.trim().length > 20) {
+        next = {
+          tabId,
+          url,
+          kind: "page",
+          status: "page_ready",
+          title: extracted.title || tab.title || url,
+          pageText: clampPageText(extracted.text),
+          sourceKey: "page:" + url,
+          chat: null
+        };
+      } else {
+        next = {
+          tabId,
+          url,
+          kind: "page",
+          status: "error",
+          title: tab.title || url,
+          error: "Couldn't read this page's text to summarize it."
+        };
+      }
+      await setTabState(tabId, next);
+      await broadcastIfActive(tabId, next);
+      return;
+    }
+    if (kind === "youtube") {
+      const placeholder = cached?.kind === "youtube" ? cached : { tabId, url, kind, status: "idle", title: tab.title || "" };
+      broadcast({ ...placeholder, tabId });
+      return;
+    }
+    const hint = kind === "youtube-other" ? "Open a YouTube video, or switch to an article to summarize it." : "This page can't be summarized. Open a webpage or a YouTube video.";
+    const idle = { tabId, url, kind, status: "idle", title: tab.title || "", hint };
+    await setTabState(tabId, idle);
+    await broadcastIfActive(tabId, idle);
+  }
+  async function extractPage(tabId) {
     try {
-      const r = await chrome.storage.session.get([SESSION_KEY]);
-      return r?.[SESSION_KEY] || null;
-    } catch (_) {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: extractPageContent
+      });
+      return results?.[0]?.result || null;
+    } catch (e) {
+      console.debug("[Summarizer] page extract failed:", e?.message || e);
       return null;
+    }
+  }
+  async function syncActiveTab() {
+    const tab = await getActiveTab();
+    if (tab) await ensureTabState(tab);
+  }
+  chrome.tabs?.onActivated?.addListener(() => {
+    syncActiveTab();
+  });
+  chrome.windows?.onFocusChanged?.addListener(() => {
+    syncActiveTab();
+  });
+  chrome.tabs?.onUpdated?.addListener((tabId, info, tab) => {
+    getActiveTab().then((active) => {
+      if (!active || active.id !== tabId) {
+        if (info.url) deleteTabState(tabId);
+        return;
+      }
+      if (info.url || info.status === "complete") ensureTabState(tab);
+    });
+  });
+  chrome.tabs?.onRemoved?.addListener((tabId) => {
+    deleteTabState(tabId);
+  });
+  chrome.commands?.onCommand?.addListener((command) => {
+    if (command === "open_side_panel") openSidePanelForActiveTab();
+  });
+  async function openSidePanelForActiveTab() {
+    const tab = await getActiveTab();
+    try {
+      const opts = tab?.windowId != null ? { windowId: tab.windowId } : tab?.id != null ? { tabId: tab.id } : {};
+      await chrome.sidePanel?.open?.(opts);
+      if (tab) ensureTabState(tab);
+    } catch (e) {
+      console.debug("[Summarizer] open via shortcut failed:", e?.message || e);
     }
   }
   var YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
@@ -220,7 +401,11 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         sendResponse?.({ ok: true });
         return false;
       case MSG.PUBLISH_SUMMARY:
-        setSessionState(message.payload);
+        handlePublish(message.payload, sender);
+        sendResponse?.({ ok: true });
+        return false;
+      case MSG.SAVE_CHAT:
+        handleSaveChat(message, sender);
         sendResponse?.({ ok: true });
         return false;
       case MSG.OPEN_SIDE_PANEL:
@@ -228,7 +413,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         return true;
       // async response
       case MSG.SUMMARY_STATE_REQUEST:
-        getSessionState().then((state) => sendResponse({ ok: true, state }));
+        handleStateRequest(sendResponse);
         return true;
       // async response
       case MSG.CHAT_MESSAGE:
@@ -246,6 +431,33 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         return false;
     }
   });
+  async function handlePublish(payload, sender) {
+    const tabId = sender?.tab?.id;
+    if (tabId == null || !payload) return;
+    const prev = await getTabState(tabId);
+    const next = { ...prev || {}, ...payload, tabId, kind: "youtube" };
+    if (payload.videoId && prev?.videoId && payload.videoId !== prev.videoId) {
+      next.chat = null;
+    }
+    if (payload.videoId) next.sourceKey = "yt:" + payload.videoId;
+    await setTabState(tabId, next);
+    await broadcastIfActive(tabId, next);
+  }
+  async function handleSaveChat(message, sender) {
+    const tabId = message.tabId ?? sender?.tab?.id ?? (await getActiveTab())?.id;
+    if (tabId == null) return;
+    await patchTabState(tabId, { chat: message.chat || null });
+  }
+  async function handleStateRequest(sendResponse) {
+    const tab = await getActiveTab();
+    if (!tab) {
+      sendResponse({ ok: true, state: null });
+      return;
+    }
+    const state = await getTabState(tab.id);
+    sendResponse({ ok: true, state: state ? { ...state, tabId: tab.id } : null });
+    ensureTabState(tab);
+  }
   async function handleGenerate(message, sender, sendResponse) {
     try {
       if (message.videoUrl && !YOUTUBE_DOMAIN_RE.test(message.videoUrl)) {
@@ -365,13 +577,17 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
   }
   async function openSidePanel(sender) {
     try {
+      const active = await getActiveTab();
+      if (sender?.tab?.id != null && active && active.id !== sender.tab.id) {
+        return false;
+      }
       const opts = {};
       if (sender?.tab?.windowId != null) opts.windowId = sender.tab.windowId;
       else if (sender?.tab?.id != null) opts.tabId = sender.tab.id;
       await chrome.sidePanel?.open?.(opts);
       return true;
     } catch (e) {
-      console.debug("[YT Summarizer] sidePanel.open skipped:", e?.message || e);
+      console.debug("[Summarizer] sidePanel.open skipped:", e?.message || e);
       return false;
     }
   }

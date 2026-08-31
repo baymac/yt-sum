@@ -86,7 +86,9 @@ function summarizeVideo({ videoId, title, auto = false }) {
 		publish({ status: "loading", videoId, title });
 		// sidePanel.open() needs a user gesture and the gesture doesn't survive the
 		// message hop to the SW on every Chrome build — so we ask, then check.
-		const opened = await sendMessage({ type: MSG.OPEN_SIDE_PANEL });
+		// Auto-fetch (transcript prefetch, no user gesture) must never pop the panel:
+		// a video opened in a *background* tab shouldn't steal the focused surface.
+		const opened = auto ? null : await sendMessage({ type: MSG.OPEN_SIDE_PANEL });
 		const panelOpened = opened?.opened === true;
 		if (settled) return; // cancelled/superseded during setup
 

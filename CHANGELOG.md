@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.3.0.0] - 2026-08-31
+
+### Added
+- Summarize any page, not just YouTube: on a normal article or blog the panel reads the page text and the **Summarize page** button (and free-form chat) run an article-tuned prompt. YouTube keeps its transcript flow.
+- Per-tab memory: each tab's summary and chat are cached, so switching tabs and coming back restores that tab's conversation exactly as you left it.
+- Keyboard shortcut to open the side panel: **Ctrl+Shift+S** (Windows/Linux) / **Command+Shift+S** (macOS), rebindable at `chrome://extensions/shortcuts`.
+
+### Changed
+- The side panel now follows the **focused tab only**. A video (or page) opened in a background tab caches silently and no longer hijacks the panel.
+- Background tab auto-fetch no longer tries to open/steal the side panel.
+
+### Permissions
+- Added `scripting` and broad host access (`http://*/*`, `https://*/*`) so page text can be extracted for summarization.
+
+
 ## [2.2.0.0] - 2026-06-16
 
 ### Added

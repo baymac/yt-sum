@@ -378,3 +378,132 @@ describe("popup renderState branches", () => {
 		expect(isHidden(document.getElementById("settingsView"))).toBe(true);
 	});
 });
+
+describe("popup page summary + per-tab chat cache", () => {
+	beforeEach(() => {
+		globalThis.chrome = makeChrome({ geminiApiKey: "k" });
+	});
+
+	it("page_ready reveals Summarize and summarizes the article via chat", async () => {
+		const { broadcast } = await loadPopup();
+		broadcast({ status: "page_ready", tabId: 1, kind: "page", title: "Post", url: "https://ex.com/a", pageText: "ARTICLE BODY" });
+		expect(isHidden(btn())).toBe(false);
+		btn().click();
+		await flush();
+		expect(isHidden(btn())).toBe(true);
+		expect(document.getElementById("chatMessages").textContent).toContain("Summary.");
+	});
+
+	it("summarizing a page sends the article prompt (not the transcript one)", async () => {
+		const c = await loadPopupChat();
+		c.broadcast({ status: "page_ready", tabId: 1, kind: "page", title: "Post", url: "https://ex.com/a", pageText: "ARTICLE_BODY_123" });
+		document.getElementById("summarizeForChatBtn").click();
+		await flush();
+		expect(c.chatCalls).toHaveLength(1);
+		const prompt = c.chatCalls[0].msg.history[0].text;
+		expect(prompt).toContain("summarizing an article");
+		expect(prompt).toContain("ARTICLE_BODY_123");
+		c.chatCalls[0].cb({ ok: true, text: "Done." });
+		await flush();
+	});
+
+	it("switching to another tab and back restores that tab's cached chat verbatim", async () => {
+		const { broadcast } = await loadPopup();
+		// Tab 1: a YouTube transcript the user summarizes.
+		broadcast({ status: "transcript_ready", tabId: 1, videoId: "A", title: "T", transcript: "words" });
+		btn().click();
+		await flush();
+		expect(document.getElementById("chatMessages").textContent).toContain("Summary.");
+
+		// Switch to tab 2 (a fresh page) → the old chat must clear.
+		broadcast({ status: "page_ready", tabId: 2, kind: "page", title: "P2", url: "u2", pageText: "x" });
+		await flush();
+		expect(document.getElementById("chatMessages").textContent).not.toContain("Summary.");
+
+		// Switch back to tab 1 with its cached chat → the conversation reappears.
+		broadcast({
+			status: "transcript_ready",
+			tabId: 1,
+			videoId: "A",
+			title: "T",
+			transcript: "words",
+			chat: {
+				history: [{ role: "user", text: "p" }, { role: "model", text: "Summary." }],
+				bubbles: [{ role: "model", text: "Summary." }],
+				summaryContext: { title: "T", summary: "Summary." },
+			},
+		});
+		await flush();
+		expect(document.getElementById("chatMessages").textContent).toContain("Summary.");
+		// One-shot Summarize button stays hidden when a cached chat is restored.
+		expect(isHidden(btn())).toBe(true);
+	});
+});
+
+describe("popup collapsible summarize prompt", () => {
+	beforeEach(() => {
+		globalThis.chrome = makeChrome({ geminiApiKey: "k" });
+	});
+
+	it("renders the Summarize prompt as a collapsed box that expands on click", async () => {
+		const { broadcast } = await loadPopup();
+		broadcast({ status: "transcript_ready", tabId: 1, videoId: "A", title: "T", transcript: "SECRET_WORDS" });
+		btn().click();
+		await flush();
+
+		const box = document.querySelector(".collapsible-msg");
+		expect(box).toBeTruthy();
+		expect(box.classList.contains("collapsed")).toBe(true);
+		// The bulky transcript body is never dumped into the bubble.
+		expect(document.querySelector(".chat-bubble-user").textContent).not.toContain("SECRET_WORDS");
+
+		box.click();
+		expect(box.classList.contains("collapsed")).toBe(false);
+		box.click();
+		expect(box.classList.contains("collapsed")).toBe(true);
+	});
+});
+
+describe("popup Summarize one-shot survives re-broadcasts", () => {
+	beforeEach(() => {
+		globalThis.chrome = makeChrome({ geminiApiKey: "k" });
+	});
+
+	it("Summarize page button stays gone after a click even if page_ready is re-broadcast", async () => {
+		const { broadcast } = await loadPopup();
+		const page = { status: "page_ready", tabId: 1, kind: "page", title: "P", url: "https://ex.com/a", pageText: "BODY" };
+		broadcast(page);
+		expect(isHidden(btn())).toBe(false);
+
+		btn().click();
+		await flush();
+		expect(isHidden(btn())).toBe(true);
+
+		// Background re-broadcasts page_ready for the SAME tab (tab re-activated /
+		// state re-requested). The one-shot button must not resurrect.
+		broadcast(page);
+		await flush();
+		expect(isHidden(btn())).toBe(true);
+	});
+});
+
+describe("popup export button", () => {
+	beforeEach(() => {
+		globalThis.chrome = makeChrome({ geminiApiKey: "k" });
+	});
+
+	it("model responses get Export next to Copy; the prompt bubble gets Copy only", async () => {
+		const { broadcast } = await loadPopup();
+		broadcast({ status: "transcript_ready", tabId: 1, videoId: "A", title: "T", transcript: "words" });
+		btn().click();
+		await flush();
+
+		const modelBubble = document.querySelector(".chat-bubble-model");
+		expect(modelBubble.querySelector(".chat-copy-btn")).toBeTruthy();
+		expect(modelBubble.querySelector(".chat-export-btn")).toBeTruthy();
+
+		const promptBubble = document.querySelector(".chat-bubble-user");
+		expect(promptBubble.querySelector(".chat-copy-btn")).toBeTruthy();
+		expect(promptBubble.querySelector(".chat-export-btn")).toBeFalsy();
+	});
+});

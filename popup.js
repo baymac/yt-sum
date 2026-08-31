@@ -151,7 +151,8 @@
     CANCEL_SUMMARY: "CANCEL_SUMMARY",
     CHAT_MESSAGE: "CHAT_MESSAGE",
     CHAT_PROGRESS: "CHAT_PROGRESS",
-    CHAT_STOP: "CHAT_STOP"
+    CHAT_STOP: "CHAT_STOP",
+    SAVE_CHAT: "SAVE_CHAT"
   };
 
   // src/lib/summarize.js
@@ -186,6 +187,53 @@ Write in plain, direct language. Do not invent content that isn't supported by t
 
 ${head}TRANSCRIPT:
 ${clampTranscript(transcript)}`;
+  }
+
+  // src/lib/page.js
+  var MAX_PAGE_CHARS = 2e5;
+  var PAGE_SUMMARY_INSTRUCTION = `You are summarizing an article so the reader does NOT have to read it. Produce a clear, well-structured Markdown summary with these sections:
+
+## TL;DR
+2-3 sentences capturing the core message.
+
+## Key Points
+A bulleted list of the main points, arguments, or steps in the order they appear. Be specific \u2014 include the concrete facts, numbers, names, and conclusions, not vague descriptions.
+
+## Details
+A few short paragraphs walking through the substance so the reader gets everything important without reading.
+
+## Takeaways
+The most useful insights or action items.
+
+Write in plain, direct language. Do not invent content that isn't supported by the source.`;
+  function clampPageText(text, max = MAX_PAGE_CHARS) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return `${text.slice(0, max)}
+
+[content truncated for length]`;
+  }
+  function buildPagePrompt({ title, url, pageText }) {
+    const head = title ? `Article title: ${title}
+` : "";
+    const link = url ? `URL: ${url}
+` : "";
+    return `${PAGE_SUMMARY_INSTRUCTION}
+
+${head}${link}
+ARTICLE:
+${clampPageText(pageText)}`;
+  }
+  function buildPageContext({ title, url, pageText }) {
+    const head = title ? `Article title: ${title}
+` : "";
+    const link = url ? `URL: ${url}
+` : "";
+    return `You are answering questions about a web article using its text as the source. If the text doesn't cover something, say so.
+
+${head}${link}
+ARTICLE:
+${clampPageText(pageText)}`;
   }
 
   // src/popup.js
@@ -263,7 +311,11 @@ ${clampTranscript(transcript)}`;
     let chatStreaming = false;
     let pendingChatText = "";
     let transcriptForSummarize = null;
-    let chatVideoId = null;
+    let pageForSummarize = null;
+    let pageMeta = { url: "", title: "" };
+    let currentKind = "youtube";
+    let currentTabId = null;
+    let chatSourceKey = null;
     function clearChat() {
       if (chatStreaming) {
         chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => {
@@ -274,7 +326,8 @@ ${clampTranscript(transcript)}`;
       chatStreaming = false;
       pendingChatText = "";
       transcriptForSummarize = null;
-      chatVideoId = null;
+      pageForSummarize = null;
+      chatSourceKey = null;
       els.chatMessages.innerHTML = "";
       els.chatInput.value = "";
       els.chatInput.disabled = false;
@@ -325,6 +378,124 @@ ${clampTranscript(transcript)}`;
       });
       return btn;
     }
+    function idbOpen() {
+      return new Promise((res, rej) => {
+        const r = indexedDB.open("summarizer-export", 1);
+        r.onupgradeneeded = () => r.result.createObjectStore("kv");
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    }
+    async function idbGet(key) {
+      const db = await idbOpen();
+      return new Promise((res, rej) => {
+        const req = db.transaction("kv", "readonly").objectStore("kv").get(key);
+        req.onsuccess = () => res(req.result || null);
+        req.onerror = () => rej(req.error);
+      });
+    }
+    async function idbSet(key, val) {
+      const db = await idbOpen();
+      return new Promise((res, rej) => {
+        const tx = db.transaction("kv", "readwrite");
+        tx.objectStore("kv").put(val, key);
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      });
+    }
+    function sourceUrl() {
+      if (!chatSourceKey) return "";
+      if (chatSourceKey.startsWith("page:")) return chatSourceKey.slice(5);
+      if (chatSourceKey.startsWith("yt:")) return "https://www.youtube.com/watch?v=" + chatSourceKey.slice(3);
+      return "";
+    }
+    function makeFilename(title) {
+      const safe = (title || "Summary").replace(/[\\/:*?"<>|#^[\]]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || "Summary";
+      const d = /* @__PURE__ */ new Date();
+      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      return `${safe} ${stamp}.md`;
+    }
+    function buildExportDoc(title, url, md) {
+      const fm = [
+        "---",
+        `title: "${String(title).replace(/"/g, '\\"')}"`,
+        url ? `source: ${url}` : null,
+        `exported: ${(/* @__PURE__ */ new Date()).toISOString()}`,
+        "---",
+        ""
+      ].filter((l) => l !== null).join("\n");
+      return `${fm}
+${md}
+`;
+    }
+    async function getVaultDir() {
+      let handle = await idbGet("vaultDir").catch(() => null);
+      if (handle) {
+        let perm = await handle.queryPermission({ mode: "readwrite" }).catch(() => "prompt");
+        if (perm !== "granted") perm = await handle.requestPermission({ mode: "readwrite" }).catch(() => "denied");
+        if (perm !== "granted") handle = null;
+      }
+      if (!handle) {
+        handle = await window.showDirectoryPicker({ mode: "readwrite", id: "obsidianVault" });
+        await idbSet("vaultDir", handle).catch(() => {
+        });
+      }
+      return handle;
+    }
+    function anchorDownload(filename, content) {
+      const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1e4);
+    }
+    async function exportMarkdown(md) {
+      const title = (summaryContext.title || els.panelTitle.textContent || "Summary").trim();
+      const filename = makeFilename(title);
+      const content = buildExportDoc(title, sourceUrl(), md);
+      if (typeof window.showDirectoryPicker === "function") {
+        const dir = await getVaultDir();
+        const fileHandle = await dir.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(content);
+        await writable.close();
+        return { filename, vault: true };
+      }
+      anchorDownload(filename, content);
+      return { filename, vault: false };
+    }
+    function makeExportBtn(getText) {
+      const btn = document.createElement("button");
+      btn.className = "chat-export-btn";
+      btn.type = "button";
+      btn.textContent = "Export";
+      btn.title = "Export as .md to your Obsidian vault";
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const md = getText() || "";
+        if (!md.trim()) return;
+        btn.disabled = true;
+        try {
+          const { vault } = await exportMarkdown(md);
+          btn.textContent = vault ? "Exported \u2713" : "Downloaded";
+          btn.classList.add("copied");
+        } catch (err) {
+          btn.textContent = err?.name === "AbortError" ? "Cancelled" : "Failed";
+          console.debug("[Summarizer] export failed:", err);
+        } finally {
+          setTimeout(() => {
+            btn.textContent = "Export";
+            btn.classList.remove("copied");
+            btn.disabled = false;
+          }, 1600);
+        }
+      });
+      return btn;
+    }
     function fillModel(wrap, rawText, html) {
       wrap._rawText = rawText || "";
       wrap._content.innerHTML = html != null ? html : formatSummary(rawText || "");
@@ -340,19 +511,37 @@ ${clampTranscript(transcript)}`;
       div._rawText = "";
       if (opts.displayType === "transcript") {
         div._rawText = text || "";
-        const splitIdx = text ? text.indexOf("\nTRANSCRIPT:\n") : -1;
-        if (splitIdx !== -1) {
-          content.innerHTML = formatSummary(text.slice(0, splitIdx)) + '<p>TRANSCRIPT: <span class="transcript-pill">\u{1F4C4} Transcript</span></p>';
-        } else {
-          content.innerHTML = '<span class="transcript-pill">\u{1F4C4} Transcript</span>';
-        }
+        div._displayType = "transcript";
+        const isArticle = text ? text.includes("\nARTICLE:\n") : false;
+        const marker = isArticle ? "\nARTICLE:\n" : "\nTRANSCRIPT:\n";
+        const label = isArticle ? "\u{1F4C4} Article" : "\u{1F4C4} Transcript";
+        const splitIdx = text ? text.indexOf(marker) : -1;
+        const instruction = splitIdx !== -1 ? text.slice(0, splitIdx) : text || "";
+        const preview = instruction.replace(/\s+/g, " ").trim().slice(0, 180);
+        content.innerHTML = `<div class="collapsible-msg collapsed" role="button" tabindex="0" aria-expanded="false"><div class="collapsible-preview">${escapeHtml2(preview)}<span class="collapsible-hint"> \u25BE show</span></div><div class="collapsible-full">` + formatSummary(instruction) + `<p><span class="transcript-pill">${label}</span></p><span class="collapsible-hint">\u25B4 hide</span></div></div>`;
+        const box = content.querySelector(".collapsible-msg");
+        const toggle = () => {
+          const collapsed = box.classList.toggle("collapsed");
+          box.setAttribute("aria-expanded", String(!collapsed));
+        };
+        box.addEventListener("click", toggle);
+        box.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggle();
+          }
+        });
       } else if (text) {
         div._rawText = text;
         content.innerHTML = role === "model" ? formatSummary(text) : escapeHtml2(text);
       }
       div.appendChild(content);
       if (role === "model" || opts.displayType === "transcript") {
-        div.appendChild(makeCopyBtn(() => div._rawText));
+        const actions = document.createElement("div");
+        actions.className = "chat-actions";
+        actions.appendChild(makeCopyBtn(() => div._rawText));
+        if (role === "model") actions.appendChild(makeExportBtn(() => div._rawText));
+        div.appendChild(actions);
       }
       els.chatMessages.appendChild(div);
       div.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -370,11 +559,10 @@ ${transcriptForSummarize}`;
     async function sendChatMessage() {
       const text = els.chatInput.value.trim();
       if (!text || chatStreaming) return;
-      if (!chatHistory.length && transcriptForSummarize) {
-        chatHistory.push(
-          { role: "user", text: buildTranscriptContext() },
-          { role: "model", text: "Got it \u2014 I've read the transcript. What would you like to know?" }
-        );
+      if (!chatHistory.length && (transcriptForSummarize || pageForSummarize)) {
+        const seed = currentKind === "page" ? buildPageContext({ title: pageMeta.title, url: pageMeta.url, pageText: pageForSummarize }) : buildTranscriptContext();
+        const ack = currentKind === "page" ? "Got it \u2014 I've read the article. What would you like to know?" : "Got it \u2014 I've read the transcript. What would you like to know?";
+        chatHistory.push({ role: "user", text: seed }, { role: "model", text: ack });
       }
       els.chatInput.value = "";
       autoResizeInput(els.chatInput);
@@ -384,16 +572,19 @@ ${transcriptForSummarize}`;
       setChatSendState(true);
       pendingChatText = "";
       const context = { ...summaryContext };
+      const sendTabId = currentTabId;
       try {
         chrome.runtime.sendMessage(
           { type: MSG.CHAT_MESSAGE, history: outgoingHistory, context },
           (resp) => {
             void chrome.runtime?.lastError;
             setChatSendState(false);
+            if (currentTabId !== sendTabId) return;
             if (resp?.cancelled) {
               if (pendingChatText) {
                 chatHistory.push({ role: "user", text }, { role: "model", text: pendingChatText });
                 fillModel(modelBubble, pendingChatText);
+                persistChat();
               } else {
                 modelBubble.remove();
               }
@@ -402,6 +593,7 @@ ${transcriptForSummarize}`;
             if (resp?.ok && resp.text) {
               chatHistory.push({ role: "user", text }, { role: "model", text: resp.text });
               fillModel(modelBubble, resp.text);
+              persistChat();
             } else {
               fillModel(modelBubble, "", `<span role="alert" style="color:#c62828">${escapeHtml2(resp?.error || "Failed to get response.")}</span>`);
             }
@@ -418,7 +610,7 @@ ${transcriptForSummarize}`;
     }
     function startSummarize() {
       if (chatStreaming) return;
-      const prompt = buildTranscriptPrompt({ title: summaryContext.title, transcript: transcriptForSummarize });
+      const prompt = currentKind === "page" ? buildPagePrompt({ title: pageMeta.title, url: pageMeta.url, pageText: pageForSummarize }) : buildTranscriptPrompt({ title: summaryContext.title, transcript: transcriptForSummarize });
       const outgoingHistory = [{ role: "user", text: prompt, displayType: "transcript" }];
       appendChatMessage("user", prompt, { displayType: "transcript" });
       const modelBubble = appendChatMessage("model", "");
@@ -426,16 +618,19 @@ ${transcriptForSummarize}`;
       els.chatInput.disabled = false;
       setChatSendState(true);
       pendingChatText = "";
+      const sendTabId = currentTabId;
       chrome.runtime.sendMessage(
         { type: MSG.CHAT_MESSAGE, history: outgoingHistory, context: summaryContext },
         (resp) => {
           void chrome.runtime?.lastError;
           setChatSendState(false);
+          if (currentTabId !== sendTabId) return;
           if (resp?.cancelled) {
             if (pendingChatText) {
               chatHistory.push({ role: "user", text: prompt }, { role: "model", text: pendingChatText });
               fillModel(modelBubble, pendingChatText);
               summaryContext.summary = pendingChatText;
+              persistChat();
             } else {
               modelBubble.remove();
             }
@@ -445,6 +640,7 @@ ${transcriptForSummarize}`;
             chatHistory.push({ role: "user", text: prompt }, { role: "model", text: resp.text });
             summaryContext.summary = resp.text;
             fillModel(modelBubble, resp.text);
+            persistChat();
           } else {
             fillModel(modelBubble, "", `<span role="alert" style="color:#c62828">${escapeHtml2(resp?.error || "Failed.")}</span>`);
           }
@@ -469,7 +665,7 @@ ${transcriptForSummarize}`;
     });
     els.summarizeForChatBtn.addEventListener("click", startSummarize);
     chrome.runtime.onMessage.addListener((message) => {
-      if (message?.type === MSG.SUMMARY_READY) renderState(message.state);
+      if (message?.type === MSG.SUMMARY_READY) applyState(message.state);
       if (message?.type === MSG.CHAT_PROGRESS && chatStreaming) {
         pendingChatText = message.text;
         const bubbles = els.chatMessages.querySelectorAll(".chat-bubble-model");
@@ -479,14 +675,76 @@ ${transcriptForSummarize}`;
     });
     chrome.runtime.sendMessage({ type: MSG.SUMMARY_STATE_REQUEST }, (resp) => {
       void chrome.runtime?.lastError;
-      if (resp?.state) renderState(resp.state);
+      if (resp?.state) applyState(resp.state);
     });
+    function collectBubbles() {
+      const out = [];
+      for (const div of els.chatMessages.children) {
+        const role = div.classList.contains("chat-bubble-user") ? "user" : "model";
+        const text = div._rawText != null ? div._rawText : div._content ? div._content.textContent : "";
+        if (!text) continue;
+        out.push({ role, text, displayType: div._displayType });
+      }
+      return out;
+    }
+    function restoreBubbles(bubbles) {
+      els.chatMessages.innerHTML = "";
+      for (const b of bubbles || []) {
+        appendChatMessage(b.role, b.text, b.displayType ? { displayType: b.displayType } : {});
+      }
+    }
+    function persistChat() {
+      if (currentTabId == null) return;
+      chrome.runtime.sendMessage(
+        {
+          type: MSG.SAVE_CHAT,
+          tabId: currentTabId,
+          chat: { history: chatHistory, bubbles: collectBubbles(), summaryContext }
+        },
+        () => {
+          void chrome.runtime?.lastError;
+        }
+      );
+    }
+    function applyState(state) {
+      if (!state) return;
+      const incomingTab = state.tabId != null ? state.tabId : null;
+      const isSwitch = incomingTab != null && incomingTab !== currentTabId;
+      if (incomingTab != null) currentTabId = incomingTab;
+      if (isSwitch) restoreTabState(state);
+      else renderState(state);
+    }
+    function restoreTabState(state) {
+      if (chatStreaming) {
+        chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => {
+          void chrome.runtime?.lastError;
+        });
+      }
+      chatHistory = [];
+      chatStreaming = false;
+      pendingChatText = "";
+      els.chatMessages.innerHTML = "";
+      setChatSendState(false);
+      renderState(state);
+      const chat = state.chat;
+      if (chat && Array.isArray(chat.bubbles) && chat.bubbles.length) {
+        chatHistory = Array.isArray(chat.history) ? [...chat.history] : [];
+        if (chat.summaryContext) summaryContext = chat.summaryContext;
+        restoreBubbles(chat.bubbles);
+        showChat();
+        els.chatInput.disabled = false;
+        els.viewTop.setAttribute("hidden", "");
+        document.body.classList.add("chat-active");
+        els.summarizeForChatBtn.setAttribute("hidden", "");
+      }
+    }
     function renderState(state) {
       if (!state) return;
       if (state.status === "idle") {
         els.summaryStatus.className = "summary-status";
         els.summaryStatus.textContent = "";
         els.summaryBody.innerHTML = "";
+        if (state.hint) els.idleHint.textContent = state.hint;
         els.idleHint.removeAttribute("hidden");
         clearChat();
         return;
@@ -497,22 +755,44 @@ ${transcriptForSummarize}`;
       els.viewTop.removeAttribute("hidden");
       els.settingsToggle.textContent = "\u2699\uFE0F";
       if (state.title) els.panelTitle.textContent = state.title;
-      if (state.status === "loading") {
-        if (chatVideoId && state.videoId === chatVideoId) return;
+      if (state.status === "loading" || state.status === "loading-page") {
+        const key = state.status === "loading-page" ? "page:" + (state.url || "") : "yt:" + (state.videoId || "");
+        if (chatSourceKey && key === chatSourceKey) return;
         clearChat();
         els.summaryStatus.className = "summary-status";
-        els.summaryStatus.innerHTML = '<span class="loader"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span> Fetching transcript\u2026';
+        const label = state.status === "loading-page" ? "Reading page\u2026" : "Fetching transcript\u2026";
+        els.summaryStatus.innerHTML = '<span class="loader"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span> ' + label;
         els.summaryBody.innerHTML = "";
       } else if (state.status === "transcript_ready") {
+        currentKind = "youtube";
         transcriptForSummarize = state.transcript;
-        chatVideoId = state.videoId || null;
+        pageForSummarize = null;
+        chatSourceKey = state.videoId ? "yt:" + state.videoId : null;
+        summaryContext = { title: state.title || "", summary: "" };
+        els.summarizeForChatBtn.textContent = "Summarize";
+        els.summaryStatus.className = "summary-status";
+        els.summaryStatus.textContent = "";
+        els.summaryBody.innerHTML = "";
+        els.viewTop.setAttribute("hidden", "");
+        showChat();
+        els.summarizeForChatBtn.toggleAttribute("hidden", els.chatMessages.children.length > 0);
+        els.chatInput.disabled = false;
+        document.body.classList.add("chat-active");
+        els.chatInput.focus();
+      } else if (state.status === "page_ready") {
+        currentKind = "page";
+        pageForSummarize = state.pageText;
+        transcriptForSummarize = null;
+        pageMeta = { url: state.url || "", title: state.title || "" };
+        chatSourceKey = state.url ? "page:" + state.url : null;
         summaryContext = { title: state.title || "", summary: "" };
         els.summaryStatus.className = "summary-status";
         els.summaryStatus.textContent = "";
         els.summaryBody.innerHTML = "";
         els.viewTop.setAttribute("hidden", "");
         showChat();
-        els.summarizeForChatBtn.removeAttribute("hidden");
+        els.summarizeForChatBtn.textContent = "Summarize page";
+        els.summarizeForChatBtn.toggleAttribute("hidden", els.chatMessages.children.length > 0);
         els.chatInput.disabled = false;
         document.body.classList.add("chat-active");
         els.chatInput.focus();
@@ -530,7 +810,8 @@ ${transcriptForSummarize}`;
         els.summaryStatus.textContent = "";
         const note = state.mode === "video" ? '<p class="source-note">Captions were unavailable, so Gemini watched the video to produce this.</p>' : "";
         els.summaryBody.innerHTML = note + formatSummary(state.text || "");
-        chatVideoId = state.videoId || null;
+        currentKind = "youtube";
+        chatSourceKey = state.videoId ? "yt:" + state.videoId : null;
         summaryContext = { title: state.title || "", summary: state.text || "" };
         showChat();
         els.chatInput.disabled = false;

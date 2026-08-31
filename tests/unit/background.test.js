@@ -1,15 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makeChrome } from "../setup.js";
-import { MSG, SESSION_KEY } from "../../src/lib/messages.js";
+import { MSG, TAB_STATES_KEY } from "../../src/lib/messages.js";
 
 // Load background.js fresh with a chrome mock whose onMessage.addListener we
 // capture, so we can drive the message hub directly.
 async function loadBackground(initial = { geminiApiKey: "k" }) {
 	vi.resetModules();
 	let listener;
+	let commandListener;
 	const chrome = makeChrome(initial);
 	chrome.runtime.onMessage.addListener = vi.fn((cb) => {
 		listener = cb;
+	});
+	chrome.commands.onCommand.addListener = vi.fn((cb) => {
+		commandListener = cb;
 	});
 	globalThis.chrome = chrome;
 	await import("../../src/background.js");
@@ -18,8 +22,9 @@ async function loadBackground(initial = { geminiApiKey: "k" }) {
 			const isAsync = listener(msg, sender, resolve);
 			if (isAsync !== true) resolve(undefined);
 		});
+	const runCommand = (name) => commandListener?.(name);
 	const flush = () => new Promise((r) => setTimeout(r, 0));
-	return { chrome, invoke, flush };
+	return { chrome, invoke, runCommand, flush };
 }
 
 // Mock a streaming SSE response for callGeminiStreaming.
@@ -62,24 +67,64 @@ describe("background message hub", () => {
 		expect(resp.error).toMatch(/api key/i);
 	});
 
-	it("PUBLISH_SUMMARY stores session state and broadcasts SUMMARY_READY", async () => {
+	it("PUBLISH_SUMMARY stores per-tab state and broadcasts when the tab is active", async () => {
 		const { chrome, invoke, flush } = await loadBackground();
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, windowId: 1, url: "https://www.youtube.com/watch?v=abc" }]);
 		const payload = { status: "done", videoId: "abc", title: "T", text: "S", mode: "transcript" };
-		await invoke({ type: MSG.PUBLISH_SUMMARY, payload });
+		await invoke({ type: MSG.PUBLISH_SUMMARY, payload }, { tab: { id: 7 } });
 		await flush();
-		expect(chrome.storage.session._data[SESSION_KEY]).toEqual(payload);
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7]).toMatchObject({
+			...payload,
+			tabId: 7,
+			kind: "youtube",
+			sourceKey: "yt:abc",
+		});
 		const broadcast = chrome.runtime.sendMessage.mock.calls.find(
 			(c) => c[0]?.type === MSG.SUMMARY_READY,
 		);
-		expect(broadcast?.[0].state).toEqual(payload);
+		expect(broadcast?.[0].state).toMatchObject(payload);
 	});
 
-	it("SUMMARY_STATE_REQUEST returns the stored state", async () => {
+	it("PUBLISH_SUMMARY from a background tab caches but does NOT broadcast", async () => {
+		const { chrome, invoke, flush } = await loadBackground();
+		// Active tab is 7; the publish comes from tab 9 (a background tab).
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url: "https://www.youtube.com/watch?v=front" }]);
+		const payload = { status: "done", videoId: "bg", title: "BG", text: "S" };
+		await invoke({ type: MSG.PUBLISH_SUMMARY, payload }, { tab: { id: 9 } });
+		await flush();
+		expect(chrome.storage.session._data[TAB_STATES_KEY][9]).toMatchObject({ videoId: "bg", tabId: 9 });
+		const broadcast = chrome.runtime.sendMessage.mock.calls.find(
+			(c) => c[0]?.type === MSG.SUMMARY_READY,
+		);
+		expect(broadcast).toBeUndefined();
+	});
+
+	it("SUMMARY_STATE_REQUEST returns the active tab's stored state", async () => {
 		const { chrome, invoke } = await loadBackground();
-		const state = { status: "done", videoId: "z", text: "S" };
-		chrome.storage.session._data[SESSION_KEY] = state;
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url: "https://example.com/a" }]);
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "done", videoId: "z", text: "S", url: "https://example.com/a", tabId: 7 },
+		};
 		const resp = await invoke({ type: MSG.SUMMARY_STATE_REQUEST });
-		expect(resp).toEqual({ ok: true, state });
+		expect(resp.ok).toBe(true);
+		expect(resp.state).toMatchObject({ status: "done", text: "S", tabId: 7 });
+	});
+
+	it("SAVE_CHAT persists the chat onto the tab's state", async () => {
+		const { chrome, invoke, flush } = await loadBackground();
+		chrome.storage.session._data[TAB_STATES_KEY] = { 7: { status: "page_ready", url: "u", tabId: 7 } };
+		const chat = { history: [{ role: "user", text: "hi" }], bubbles: [], summaryContext: { title: "", summary: "" } };
+		await invoke({ type: MSG.SAVE_CHAT, tabId: 7, chat });
+		await flush();
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7].chat).toEqual(chat);
+	});
+
+	it("open_side_panel command opens the panel for the active tab's window", async () => {
+		const { chrome, runCommand, flush } = await loadBackground();
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, windowId: 3, url: "https://example.com/a" }]);
+		runCommand("open_side_panel");
+		await flush();
+		expect(chrome.sidePanel.open).toHaveBeenCalledWith({ windowId: 3 });
 	});
 
 	it("OPEN_SIDE_PANEL opens the panel and reports opened:true", async () => {
