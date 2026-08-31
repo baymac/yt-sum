@@ -8,7 +8,13 @@
 // rebroadcasts that tab's cached state (chat included), so the conversation
 // reappears exactly as it was left.
 
-import { callGeminiStreaming, buildRequestBody, GEMINI_MODEL } from "./lib/summarize.js";
+import {
+	callGeminiStreaming,
+	callOpenRouterStreaming,
+	buildRequestBody,
+	GEMINI_MODEL,
+	OPENROUTER_DEFAULT_MODEL,
+} from "./lib/summarize.js";
 import { extractPageContent, clampPageText } from "./lib/page.js";
 import { isWatchUrl } from "./lib/youtube-dom.js";
 import { storageGet } from "./lib/storage.js";
@@ -17,6 +23,35 @@ import { MSG, TAB_STATES_KEY } from "./lib/messages.js";
 // Chat is tuned hotter and shorter than the summarize path (which uses 0.3 /
 // 8192): a touch more conversational, capped so a single answer stays snappy.
 const CHAT_GENERATION_CONFIG = { temperature: 0.5, maxOutputTokens: 4096 };
+
+async function getProvider() {
+	const { aiProvider, geminiApiKey, openRouterApiKey, openRouterModel } = await storageGet([
+		"aiProvider",
+		"geminiApiKey",
+		"openRouterApiKey",
+		"openRouterModel",
+	]);
+	if (aiProvider === "openrouter") {
+		return {
+			id: "openrouter",
+			apiKey: openRouterApiKey,
+			model: openRouterModel?.trim() || OPENROUTER_DEFAULT_MODEL,
+			name: "OpenRouter",
+		};
+	}
+	return { id: "gemini", apiKey: geminiApiKey, model: GEMINI_MODEL, name: "Gemini" };
+}
+
+function missingKeyError(provider) {
+	return `Set your ${provider.name} API key in the side panel settings first.`;
+}
+
+function streamWithProvider(provider, options) {
+	if (provider.id === "openrouter") {
+		return callOpenRouterStreaming({ ...options, apiKey: provider.apiKey, model: provider.model });
+	}
+	return callGeminiStreaming({ ...options, apiKey: provider.apiKey, model: provider.model });
+}
 
 // ── Side panel wiring ────────────────────────────────────────────────────────
 
@@ -371,13 +406,20 @@ async function handleGenerate(message, sender, sendResponse) {
 			sendResponse({ ok: false, error: "Invalid video URL." });
 			return;
 		}
-		const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-		if (!geminiApiKey) {
-			sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+		const provider = await getProvider();
+		if (!provider.apiKey) {
+			sendResponse({ ok: false, error: missingKeyError(provider) });
 			return;
 		}
 
 		const mode = message.transcript?.trim() ? "transcript" : "video";
+		if (mode === "video" && provider.id === "openrouter") {
+			sendResponse({
+				ok: false,
+				error: "OpenRouter needs captions for YouTube videos. Switch to Gemini to use the video fallback.",
+			});
+			return;
+		}
 		const body = buildRequestBody({
 			mode,
 			title: message.title,
@@ -393,9 +435,7 @@ async function handleGenerate(message, sender, sendResponse) {
 
 		let finalText = "";
 		try {
-			finalText = await callGeminiStreaming({
-				apiKey: geminiApiKey,
-				model: GEMINI_MODEL,
+			finalText = await streamWithProvider(provider, {
 				body,
 				signal: controller.signal,
 				onChunk: (accumulated) => {
@@ -421,7 +461,7 @@ async function handleGenerate(message, sender, sendResponse) {
 		}
 
 		if (!finalText) {
-			sendResponse({ ok: false, error: "Gemini returned no summary (response may have been blocked)." });
+			sendResponse({ ok: false, error: `${provider.name} returned no summary (response may have been blocked).` });
 			return;
 		}
 		sendResponse({ ok: true, text: finalText, mode });
@@ -441,9 +481,9 @@ function buildChatContents(history) {
 
 async function handleChat(message, sender, sendResponse) {
 	try {
-		const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-		if (!geminiApiKey) {
-			sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+		const provider = await getProvider();
+		if (!provider.apiKey) {
+			sendResponse({ ok: false, error: missingKeyError(provider) });
 			return;
 		}
 
@@ -463,9 +503,7 @@ async function handleChat(message, sender, sendResponse) {
 		const signal = activeChatController.signal;
 
 		try {
-			const finalText = await callGeminiStreaming({
-				apiKey: geminiApiKey,
-				model: GEMINI_MODEL,
+			const finalText = await streamWithProvider(provider, {
 				body,
 				signal,
 				onChunk: (accumulated) => {

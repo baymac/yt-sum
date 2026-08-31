@@ -5,6 +5,8 @@ import {
 	buildRequestBody,
 	parseGeminiResponse,
 	callGemini,
+	buildOpenRouterRequestBody,
+	callOpenRouterStreaming,
 	summarize,
 } from "../../src/lib/summarize.js";
 
@@ -66,6 +68,62 @@ describe("parseGeminiResponse", () => {
 	it("returns null when blocked or empty", () => {
 		expect(parseGeminiResponse({ promptFeedback: { blockReason: "SAFETY" } })).toBeNull();
 		expect(parseGeminiResponse({})).toBeNull();
+	});
+});
+
+describe("OpenRouter", () => {
+	it("converts Gemini-style transcript contents to chat-completions messages", () => {
+		const body = buildOpenRouterRequestBody({
+			model: "anthropic/claude-3.5-sonnet",
+			body: {
+				contents: [
+					{ role: "user", parts: [{ text: "Question" }] },
+					{ role: "model", parts: [{ text: "Answer" }] },
+				],
+				generationConfig: { temperature: 0.5, maxOutputTokens: 99 },
+			},
+		});
+		expect(body).toMatchObject({
+			model: "anthropic/claude-3.5-sonnet",
+			messages: [
+				{ role: "user", content: "Question" },
+				{ role: "assistant", content: "Answer" },
+			],
+			temperature: 0.5,
+			max_tokens: 99,
+			stream: true,
+		});
+	});
+
+	it("streams OpenRouter content with a bearer key", async () => {
+		const chunk = new TextEncoder().encode(
+			`data: ${JSON.stringify({ choices: [{ delta: { content: "SUMMARY" } }] })}\n\ndata: [DONE]\n\n`,
+		);
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			body: new ReadableStream({ start(controller) { controller.enqueue(chunk); controller.close(); } }),
+		}));
+		const text = await callOpenRouterStreaming({
+			apiKey: "or-key",
+			model: "meta-llama/llama-3.1-8b-instruct",
+			body: { contents: [{ role: "user", parts: [{ text: "Summarize" }] }] },
+			fetchImpl,
+		});
+		expect(text).toBe("SUMMARY");
+		expect(fetchImpl.mock.calls[0][0]).toBe("https://openrouter.ai/api/v1/chat/completions");
+		expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe("Bearer or-key");
+		expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toMatchObject({
+			model: "meta-llama/llama-3.1-8b-instruct",
+			messages: [{ role: "user", content: "Summarize" }],
+		});
+	});
+
+	it("rejects the Gemini-only video fallback", () => {
+		expect(() =>
+			buildOpenRouterRequestBody({
+				body: buildRequestBody({ mode: "video", videoUrl: "https://youtu.be/x" }),
+			}),
+		).toThrow(/video fallback/i);
 	});
 });
 

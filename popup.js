@@ -248,7 +248,12 @@ ${clampPageText(pageText)}`;
       summaryStatus: $("summaryStatus"),
       summaryBody: $("summaryBody"),
       idleHint: $("idleHint"),
+      provider: $("provider"),
       apiKey: $("apiKey"),
+      apiKeyLabel: $("apiKeyLabel"),
+      apiKeyHelp: $("apiKeyHelp"),
+      openRouterModelGroup: $("openRouterModelGroup"),
+      openRouterModel: $("openRouterModel"),
       saveBtn: $("saveBtn"),
       status: $("status"),
       darkToggle: $("darkModeToggle"),
@@ -258,8 +263,25 @@ ${clampPageText(pageText)}`;
       chatSendBtn: $("chatSendBtn"),
       summarizeForChatBtn: $("summarizeForChatBtn")
     };
-    const { geminiApiKey, darkMode } = await storageGet(["geminiApiKey", "darkMode"]);
-    if (geminiApiKey) els.apiKey.value = geminiApiKey;
+    let { aiProvider, geminiApiKey, openRouterApiKey, openRouterModel, darkMode } = await storageGet([
+      "aiProvider",
+      "geminiApiKey",
+      "openRouterApiKey",
+      "openRouterModel",
+      "darkMode"
+    ]);
+    function updateProviderFields() {
+      const isOpenRouter = els.provider.value === "openrouter";
+      els.apiKeyLabel.textContent = isOpenRouter ? "OpenRouter API Key" : "Gemini API Key";
+      els.apiKey.placeholder = isOpenRouter ? "Enter your OpenRouter API key" : "Enter your Google Gemini API key";
+      els.apiKey.value = isOpenRouter ? openRouterApiKey || "" : geminiApiKey || "";
+      els.apiKeyHelp.innerHTML = isOpenRouter ? 'Get a key from <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter</a>. Stored only in your browser.' : 'Get a free key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Google AI Studio</a>. Stored only in your browser.';
+      els.openRouterModelGroup.toggleAttribute("hidden", !isOpenRouter);
+      if (isOpenRouter) els.openRouterModel.value = openRouterModel || "";
+    }
+    els.provider.value = aiProvider === "openrouter" ? "openrouter" : "gemini";
+    updateProviderFields();
+    els.provider.addEventListener("change", updateProviderFields);
     if (darkMode) {
       document.body.classList.add("dark-mode");
       els.darkToggle.classList.add("active");
@@ -299,8 +321,21 @@ ${clampPageText(pageText)}`;
       const key = els.apiKey.value.trim();
       if (!key) return showStatus(els.status, "Please enter an API key", "error");
       try {
-        await storageSet({ geminiApiKey: key });
-        showStatus(els.status, "API key saved.", "success");
+        const isOpenRouter = els.provider.value === "openrouter";
+        await storageSet(
+          isOpenRouter ? {
+            aiProvider: "openrouter",
+            openRouterApiKey: key,
+            openRouterModel: els.openRouterModel.value.trim()
+          } : { aiProvider: "gemini", geminiApiKey: key }
+        );
+        if (isOpenRouter) {
+          openRouterApiKey = key;
+          openRouterModel = els.openRouterModel.value.trim();
+        } else {
+          geminiApiKey = key;
+        }
+        showStatus(els.status, "Settings saved.", "success");
         setTimeout(() => els.status.className = "status", 2e3);
       } catch (_) {
         showStatus(els.status, "Failed to save API key.", "error");

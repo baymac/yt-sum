@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 - Summarize any page, not just YouTube: on a normal article or blog the panel reads the page text and the **Summarize page** button (and free-form chat) run an article-tuned prompt. YouTube keeps its transcript flow.
 - Per-tab memory: each tab's summary and chat are cached, so switching tabs and coming back restores that tab's conversation exactly as you left it.
 - Keyboard shortcut to open the side panel: **Ctrl+Shift+S** (Windows/Linux) / **Command+Shift+S** (macOS), rebindable at `chrome://extensions/shortcuts`.
+- OpenRouter support: store an OpenRouter API key and enter any available model ID; Gemini remains the default provider.
 
 ### Changed
 - The side panel now follows the **focused tab only**. A video (or page) opened in a background tab caches silently and no longer hijacks the panel.

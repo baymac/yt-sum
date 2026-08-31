@@ -9,10 +9,12 @@
 //                       watch the video natively. Public videos only.
 
 export const GEMINI_MODEL = "gemini-2.5-flash";
+export const OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o-mini";
 const ENDPOINT = (model) =>
 	`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 const STREAM_ENDPOINT = (model) =>
 	`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+const OPENROUTER_STREAM_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
 // Keep a long transcript comfortably under the free-tier 250K TPM ceiling while
 // still covering multi-hour videos (~200K chars ≈ 50K tokens).
@@ -236,6 +238,116 @@ export async function callGeminiStreaming({
 	}
 
 	throw new Error(`Gemini is busy right now. ${lastError}`);
+}
+
+/**
+ * OpenRouter uses the OpenAI chat-completions wire format. Convert our shared
+ * Gemini-style body so the panel can use either provider without changing the
+ * prompts or chat history it already builds.
+ */
+export function buildOpenRouterRequestBody({ model = OPENROUTER_DEFAULT_MODEL, body }) {
+	const messages = (body?.contents || []).map((content) => {
+		if ((content.parts || []).some((part) => part.file_data)) {
+			throw new Error("OpenRouter can summarize transcripts and pages, but cannot use Gemini's YouTube video fallback.");
+		}
+		const text = (content.parts || [])
+			.filter((part) => typeof part.text === "string")
+			.map((part) => part.text)
+			.join("\n");
+		if (!text) {
+			throw new Error("OpenRouter can summarize transcripts and pages, but cannot use Gemini's YouTube video fallback.");
+		}
+		return { role: content.role === "model" ? "assistant" : "user", content: text };
+	});
+
+	return {
+		model: model.trim() || OPENROUTER_DEFAULT_MODEL,
+		messages,
+		temperature: body?.generationConfig?.temperature,
+		max_tokens: body?.generationConfig?.maxOutputTokens,
+		stream: true,
+	};
+}
+
+/**
+ * Stream an OpenRouter chat-completions response. OpenRouter accepts any model
+ * identifier available to the caller's key (for example, `anthropic/claude-3.5-sonnet`).
+ */
+export async function callOpenRouterStreaming({
+	apiKey,
+	model = OPENROUTER_DEFAULT_MODEL,
+	body,
+	onChunk,
+	fetchImpl,
+	sleepImpl = sleep,
+	maxAttempts = 3,
+	signal,
+}) {
+	const f = fetchImpl || globalThis.fetch;
+	let lastError = "Request failed.";
+	const requestBody = buildOpenRouterRequestBody({ model, body });
+
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+		if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1000);
+
+		let res;
+		try {
+			res = await f(OPENROUTER_STREAM_ENDPOINT, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${apiKey}`,
+				},
+				body: JSON.stringify(requestBody),
+				signal,
+			});
+		} catch (e) {
+			if (signal?.aborted || e?.name === "AbortError") throw e;
+			lastError = `Network error: ${e?.message || e}`;
+			continue;
+		}
+
+		if (!res.ok) {
+			const errData = await res.json().catch(() => ({}));
+			const message = errData?.error?.message || res.statusText || "API error";
+			if (res.status === 401 || res.status === 403) {
+				throw new Error("Your OpenRouter API key is invalid. Update it in the side panel settings.");
+			}
+			if (!isTransient(res.status)) throw new Error(message);
+			lastError = message;
+			continue;
+		}
+
+		const reader = res.body.getReader();
+		const decoder = new TextDecoder();
+		let accumulated = "";
+		let buffer = "";
+
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buffer += decoder.decode(value, { stream: true });
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.startsWith("data: ")) continue;
+				const data = line.slice(6).trim();
+				if (!data || data === "[DONE]") continue;
+				try {
+					const text = JSON.parse(data)?.choices?.[0]?.delta?.content;
+					if (typeof text === "string" && text) {
+						accumulated += text;
+						onChunk?.(accumulated);
+					}
+				} catch (_) {}
+			}
+		}
+
+		return accumulated;
+	}
+
+	throw new Error(`OpenRouter is busy right now. ${lastError}`);
 }
 
 /**

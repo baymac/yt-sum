@@ -44,6 +44,22 @@ const sseOk = (text) => {
 	};
 };
 
+const openRouterSseOk = (text) => {
+	const chunk = new TextEncoder().encode(
+		`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`,
+	);
+	return {
+		ok: true,
+		status: 200,
+		body: new ReadableStream({
+			start(controller) {
+				controller.enqueue(chunk);
+				controller.close();
+			},
+		}),
+	};
+};
+
 describe("background message hub", () => {
 	beforeEach(() => {
 		globalThis.fetch = vi.fn(async () => sseOk("SUMMARY"));
@@ -65,6 +81,21 @@ describe("background message hub", () => {
 		const resp = await invoke({ type: MSG.GENERATE_SUMMARY, transcript: "x" });
 		expect(resp.ok).toBe(false);
 		expect(resp.error).toMatch(/api key/i);
+	});
+
+	it("CHAT_MESSAGE sends OpenRouter's selected model and key", async () => {
+		globalThis.fetch = vi.fn(async () => openRouterSseOk("OPENROUTER"));
+		const { invoke } = await loadBackground({
+			aiProvider: "openrouter",
+			openRouterApiKey: "or-key",
+			openRouterModel: "anthropic/claude-3.5-sonnet",
+		});
+		const resp = await invoke({ type: MSG.CHAT_MESSAGE, history: [{ role: "user", text: "Q" }] });
+		expect(resp).toEqual({ ok: true, text: "OPENROUTER" });
+		expect(globalThis.fetch.mock.calls[0][1].headers.Authorization).toBe("Bearer or-key");
+		const sentBody = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
+		expect(sentBody.model).toBe("anthropic/claude-3.5-sonnet");
+		expect(sentBody.messages).toEqual([{ role: "user", content: "Q" }]);
 	});
 
 	it("PUBLISH_SUMMARY stores per-tab state and broadcasts when the tab is active", async () => {

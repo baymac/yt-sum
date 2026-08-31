@@ -29,7 +29,11 @@ const POPUP_HTML = `
   </section>
   <section id="settingsView" hidden>
     <div id="darkModeToggle"></div>
+    <label id="apiKeyLabel"></label>
+    <div id="apiKeyHelp"></div>
+    <select id="provider"><option value="gemini">Gemini</option><option value="openrouter">OpenRouter</option></select>
     <input id="apiKey" type="password">
+    <div id="openRouterModelGroup" hidden><input id="openRouterModel" type="text"></div>
     <button id="saveBtn"></button>
     <div id="status"></div>
   </section>
@@ -41,14 +45,14 @@ const isHidden = (el) => el.hasAttribute("hidden");
 
 // Loads popup.js fresh against a chrome mock, captures its onMessage listener so
 // we can broadcast SUMMARY_READY states, and lets CHAT_MESSAGE be answered.
-async function loadPopup() {
+async function loadPopup(initial = { geminiApiKey: "k" }) {
 	vi.resetModules();
 	document.body.innerHTML = POPUP_HTML;
 	if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {};
 	Element.prototype.scrollIntoView = () => {};
 
 	let panelListener;
-	const chrome = makeChrome({ geminiApiKey: "k" });
+	const chrome = makeChrome(initial);
 	chrome.runtime.onMessage.addListener = vi.fn((cb) => {
 		panelListener = cb;
 	});
@@ -77,6 +81,7 @@ async function loadPopup() {
 	await flush();
 
 	return {
+		chrome,
 		broadcast: (state) => panelListener({ type: MSG.SUMMARY_READY, state }),
 	};
 }
@@ -90,6 +95,22 @@ describe("popup Summarize button persistence", () => {
 		const { broadcast } = await loadPopup();
 		broadcast({ status: "transcript_ready", videoId: "A", title: "T", transcript: "words" });
 		expect(isHidden(btn())).toBe(false);
+	});
+
+	it("saves an OpenRouter key and arbitrary model", async () => {
+		const { chrome } = await loadPopup({ aiProvider: "openrouter", openRouterApiKey: "old" });
+		const provider = document.getElementById("provider");
+		expect(provider.value).toBe("openrouter");
+		expect(document.getElementById("openRouterModelGroup").hasAttribute("hidden")).toBe(false);
+		document.getElementById("apiKey").value = "or-new";
+		document.getElementById("openRouterModel").value = "google/gemini-2.5-pro";
+		document.getElementById("saveBtn").click();
+		await flush();
+		expect(chrome.storage.sync._data).toMatchObject({
+			aiProvider: "openrouter",
+			openRouterApiKey: "or-new",
+			openRouterModel: "google/gemini-2.5-pro",
+		});
 	});
 
 	it("hides the button after Summarize is clicked (one-shot)", async () => {

@@ -64,7 +64,7 @@
 
     .form-group { margin-bottom: 18px; }
     label { display: block; margin-bottom: 6px; font-weight: 500; color: #555; font-size: 13px; }
-    input[type="text"], input[type="password"] {
+    input[type="text"], input[type="password"], select {
       width: 100%; padding: 9px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;
     }
     input:focus { outline: none; border-color: #1976d2; box-shadow: 0 0 0 2px rgba(25,118,210,.1); }
@@ -171,7 +171,7 @@
     body.dark-mode .summary-body code { background: #2d2d2d; }
     body.dark-mode .summary-body a, body.dark-mode a { color: #64b5f6; }
     body.dark-mode label { color: #b0b0b0; }
-    body.dark-mode input[type="text"], body.dark-mode input[type="password"] { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
+    body.dark-mode input[type="text"], body.dark-mode input[type="password"], body.dark-mode select { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
     body.dark-mode .dark-mode-toggle { background: #2d2d2d; }
     body.dark-mode .help-text { color: #888; }
     body.dark-mode .hint, body.dark-mode .summary-status { color: #aaa; }
@@ -218,15 +218,27 @@
       <div id="darkModeToggle" class="toggle-switch" role="switch" tabindex="0"></div>
     </div>
     <div class="form-group">
-      <label for="apiKey">Gemini API Key</label>
+      <label for="provider">AI Provider</label>
+      <select id="provider">
+        <option value="gemini">Google Gemini</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="apiKey" id="apiKeyLabel">Gemini API Key</label>
       <input type="password" id="apiKey" placeholder="Enter your Google Gemini API key" autocomplete="off">
-      <div class="help-text">
+      <div class="help-text" id="apiKeyHelp">
         Get a free key from
         <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Google AI Studio</a>.
         Stored only in your browser.
       </div>
     </div>
-    <button id="saveBtn">Save API Key</button>
+    <div class="form-group" id="openRouterModelGroup" hidden>
+      <label for="openRouterModel">OpenRouter model</label>
+      <input type="text" id="openRouterModel" placeholder="e.g. openai/gpt-4o-mini" autocomplete="off">
+      <div class="help-text">Enter any model ID available to your OpenRouter key.</div>
+    </div>
+    <button id="saveBtn">Save settings</button>
     <div id="status" class="status"></div>
   </section>
 

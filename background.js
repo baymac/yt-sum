@@ -1,7 +1,9 @@
 (() => {
   // src/lib/summarize.js
   var GEMINI_MODEL = "gemini-2.5-flash";
+  var OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o-mini";
   var STREAM_ENDPOINT = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+  var OPENROUTER_STREAM_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
   var MAX_TRANSCRIPT_CHARS = 2e5;
   var SUMMARY_INSTRUCTION = `You are summarizing a YouTube video so the reader does NOT have to watch it. Produce a clear, well-structured Markdown summary with these sections:
 
@@ -132,6 +134,95 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     }
     throw new Error(`Gemini is busy right now. ${lastError}`);
   }
+  function buildOpenRouterRequestBody({ model = OPENROUTER_DEFAULT_MODEL, body }) {
+    const messages = (body?.contents || []).map((content) => {
+      if ((content.parts || []).some((part) => part.file_data)) {
+        throw new Error("OpenRouter can summarize transcripts and pages, but cannot use Gemini's YouTube video fallback.");
+      }
+      const text = (content.parts || []).filter((part) => typeof part.text === "string").map((part) => part.text).join("\n");
+      if (!text) {
+        throw new Error("OpenRouter can summarize transcripts and pages, but cannot use Gemini's YouTube video fallback.");
+      }
+      return { role: content.role === "model" ? "assistant" : "user", content: text };
+    });
+    return {
+      model: model.trim() || OPENROUTER_DEFAULT_MODEL,
+      messages,
+      temperature: body?.generationConfig?.temperature,
+      max_tokens: body?.generationConfig?.maxOutputTokens,
+      stream: true
+    };
+  }
+  async function callOpenRouterStreaming({
+    apiKey,
+    model = OPENROUTER_DEFAULT_MODEL,
+    body,
+    onChunk,
+    fetchImpl,
+    sleepImpl = sleep,
+    maxAttempts = 3,
+    signal
+  }) {
+    const f = fetchImpl || globalThis.fetch;
+    let lastError = "Request failed.";
+    const requestBody = buildOpenRouterRequestBody({ model, body });
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1e3);
+      let res;
+      try {
+        res = await f(OPENROUTER_STREAM_ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(requestBody),
+          signal
+        });
+      } catch (e) {
+        if (signal?.aborted || e?.name === "AbortError") throw e;
+        lastError = `Network error: ${e?.message || e}`;
+        continue;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const message = errData?.error?.message || res.statusText || "API error";
+        if (res.status === 401 || res.status === 403) {
+          throw new Error("Your OpenRouter API key is invalid. Update it in the side panel settings.");
+        }
+        if (!isTransient(res.status)) throw new Error(message);
+        lastError = message;
+        continue;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const text = JSON.parse(data)?.choices?.[0]?.delta?.content;
+            if (typeof text === "string" && text) {
+              accumulated += text;
+              onChunk?.(accumulated);
+            }
+          } catch (_) {
+          }
+        }
+      }
+      return accumulated;
+    }
+    throw new Error(`OpenRouter is busy right now. ${lastError}`);
+  }
 
   // src/lib/page.js
   var MAX_PAGE_CHARS = 2e5;
@@ -202,6 +293,32 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
 
   // src/background.js
   var CHAT_GENERATION_CONFIG = { temperature: 0.5, maxOutputTokens: 4096 };
+  async function getProvider() {
+    const { aiProvider, geminiApiKey, openRouterApiKey, openRouterModel } = await storageGet([
+      "aiProvider",
+      "geminiApiKey",
+      "openRouterApiKey",
+      "openRouterModel"
+    ]);
+    if (aiProvider === "openrouter") {
+      return {
+        id: "openrouter",
+        apiKey: openRouterApiKey,
+        model: openRouterModel?.trim() || OPENROUTER_DEFAULT_MODEL,
+        name: "OpenRouter"
+      };
+    }
+    return { id: "gemini", apiKey: geminiApiKey, model: GEMINI_MODEL, name: "Gemini" };
+  }
+  function missingKeyError(provider) {
+    return `Set your ${provider.name} API key in the side panel settings first.`;
+  }
+  function streamWithProvider(provider, options) {
+    if (provider.id === "openrouter") {
+      return callOpenRouterStreaming({ ...options, apiKey: provider.apiKey, model: provider.model });
+    }
+    return callGeminiStreaming({ ...options, apiKey: provider.apiKey, model: provider.model });
+  }
   async function setupSidePanel() {
     try {
       await chrome.sidePanel?.setOptions?.({ path: "popup.html", enabled: true });
@@ -464,12 +581,19 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         sendResponse({ ok: false, error: "Invalid video URL." });
         return;
       }
-      const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-      if (!geminiApiKey) {
-        sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+      const provider = await getProvider();
+      if (!provider.apiKey) {
+        sendResponse({ ok: false, error: missingKeyError(provider) });
         return;
       }
       const mode = message.transcript?.trim() ? "transcript" : "video";
+      if (mode === "video" && provider.id === "openrouter") {
+        sendResponse({
+          ok: false,
+          error: "OpenRouter needs captions for YouTube videos. Switch to Gemini to use the video fallback."
+        });
+        return;
+      }
       const body = buildRequestBody({
         mode,
         title: message.title,
@@ -482,9 +606,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       if (videoId) activeRequests.set(videoId, controller);
       let finalText = "";
       try {
-        finalText = await callGeminiStreaming({
-          apiKey: geminiApiKey,
-          model: GEMINI_MODEL,
+        finalText = await streamWithProvider(provider, {
           body,
           signal: controller.signal,
           onChunk: (accumulated) => {
@@ -510,7 +632,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         if (videoId) activeRequests.delete(videoId);
       }
       if (!finalText) {
-        sendResponse({ ok: false, error: "Gemini returned no summary (response may have been blocked)." });
+        sendResponse({ ok: false, error: `${provider.name} returned no summary (response may have been blocked).` });
         return;
       }
       sendResponse({ ok: true, text: finalText, mode });
@@ -526,9 +648,9 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
   }
   async function handleChat(message, sender, sendResponse) {
     try {
-      const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-      if (!geminiApiKey) {
-        sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+      const provider = await getProvider();
+      if (!provider.apiKey) {
+        sendResponse({ ok: false, error: missingKeyError(provider) });
         return;
       }
       const { history } = message;
@@ -544,9 +666,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       activeChatController = new AbortController();
       const signal = activeChatController.signal;
       try {
-        const finalText = await callGeminiStreaming({
-          apiKey: geminiApiKey,
-          model: GEMINI_MODEL,
+        const finalText = await streamWithProvider(provider, {
           body,
           signal,
           onChunk: (accumulated) => {
