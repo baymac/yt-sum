@@ -1,7 +1,9 @@
 (() => {
   // src/lib/summarize.js
   var GEMINI_MODEL = "gemini-2.5-flash";
+  var OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o-mini";
   var STREAM_ENDPOINT = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+  var OPENROUTER_STREAM_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
   var MAX_TRANSCRIPT_CHARS = 2e5;
   var SUMMARY_INSTRUCTION = `You are summarizing a YouTube video so the reader does NOT have to watch it. Produce a clear, well-structured Markdown summary with these sections:
 
@@ -132,6 +134,129 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     }
     throw new Error(`Gemini is busy right now. ${lastError}`);
   }
+  function buildOpenRouterRequestBody({ model = OPENROUTER_DEFAULT_MODEL, body }) {
+    const messages = (body?.contents || []).map((content) => {
+      if ((content.parts || []).some((part) => part.file_data)) {
+        throw new Error("OpenRouter can summarize transcripts and pages, but cannot use Gemini's YouTube video fallback.");
+      }
+      const text = (content.parts || []).filter((part) => typeof part.text === "string").map((part) => part.text).join("\n");
+      if (!text) {
+        throw new Error("OpenRouter can summarize transcripts and pages, but cannot use Gemini's YouTube video fallback.");
+      }
+      return { role: content.role === "model" ? "assistant" : "user", content: text };
+    });
+    return {
+      model: model.trim() || OPENROUTER_DEFAULT_MODEL,
+      messages,
+      temperature: body?.generationConfig?.temperature,
+      max_tokens: body?.generationConfig?.maxOutputTokens,
+      stream: true
+    };
+  }
+  async function callOpenRouterStreaming({
+    apiKey,
+    model = OPENROUTER_DEFAULT_MODEL,
+    body,
+    onChunk,
+    fetchImpl,
+    sleepImpl = sleep,
+    maxAttempts = 3,
+    signal
+  }) {
+    const f = fetchImpl || globalThis.fetch;
+    let lastError = "Request failed.";
+    const requestBody = buildOpenRouterRequestBody({ model, body });
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (attempt > 0) await sleepImpl(2 ** (attempt - 1) * 1e3);
+      let res;
+      try {
+        res = await f(OPENROUTER_STREAM_ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(requestBody),
+          signal
+        });
+      } catch (e) {
+        if (signal?.aborted || e?.name === "AbortError") throw e;
+        lastError = `Network error: ${e?.message || e}`;
+        continue;
+      }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const message = errData?.error?.message || res.statusText || "API error";
+        if (res.status === 401 || res.status === 403) {
+          throw new Error("Your OpenRouter API key is invalid. Update it in the side panel settings.");
+        }
+        if (!isTransient(res.status)) throw new Error(message);
+        lastError = message;
+        continue;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const text = JSON.parse(data)?.choices?.[0]?.delta?.content;
+            if (typeof text === "string" && text) {
+              accumulated += text;
+              onChunk?.(accumulated);
+            }
+          } catch (_) {
+          }
+        }
+      }
+      return accumulated;
+    }
+    throw new Error(`OpenRouter is busy right now. ${lastError}`);
+  }
+
+  // src/lib/page.js
+  var MAX_PAGE_CHARS = 2e5;
+  function clampPageText(text, max = MAX_PAGE_CHARS) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return `${text.slice(0, max)}
+
+[content truncated for length]`;
+  }
+  function extractPageContent() {
+    const STRIP = 'script,style,noscript,template,nav,header,footer,aside,form,iframe,svg,button,select,[role="navigation"],[role="banner"],[role="contentinfo"],[aria-hidden="true"]';
+    const root = document.querySelector("article") || document.querySelector("main") || document.querySelector('[role="main"]') || document.body;
+    let text = "";
+    if (root) {
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll(STRIP).forEach((el) => el.remove());
+      text = (clone.innerText || clone.textContent || "").replace(/[ \t ]+/g, " ").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    }
+    const h1 = document.querySelector("h1");
+    const title = (h1 && (h1.innerText || h1.textContent) || "").replace(/\s+/g, " ").trim() || (document.title || "").replace(/\s+/g, " ").trim() || location.href;
+    return { title, text, url: location.href };
+  }
+
+  // src/lib/youtube-dom.js
+  function isWatchUrl(url) {
+    if (!url) return false;
+    try {
+      const u = new URL(url, "https://www.youtube.com");
+      return u.pathname === "/watch" && u.searchParams.has("v");
+    } catch (_) {
+      return /\/watch\?(?:.*&)?v=/.test(url);
+    }
+  }
 
   // src/lib/storage.js
   function storageGet(keys) {
@@ -161,46 +286,260 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     CANCEL_SUMMARY: "CANCEL_SUMMARY",
     CHAT_MESSAGE: "CHAT_MESSAGE",
     CHAT_PROGRESS: "CHAT_PROGRESS",
-    CHAT_STOP: "CHAT_STOP"
+    CHAT_DONE: "CHAT_DONE",
+    CHAT_STOP: "CHAT_STOP",
+    SAVE_CHAT: "SAVE_CHAT"
   };
-  var SESSION_KEY = "currentSummary";
+  var TAB_STATES_KEY = "tabStates";
 
   // src/background.js
   var CHAT_GENERATION_CONFIG = { temperature: 0.5, maxOutputTokens: 4096 };
+  async function getProvider() {
+    const { aiProvider, geminiApiKey, openRouterApiKey, openRouterModel } = await storageGet([
+      "aiProvider",
+      "geminiApiKey",
+      "openRouterApiKey",
+      "openRouterModel"
+    ]);
+    if (aiProvider === "openrouter") {
+      return {
+        id: "openrouter",
+        apiKey: openRouterApiKey,
+        model: openRouterModel?.trim() || OPENROUTER_DEFAULT_MODEL,
+        name: "OpenRouter"
+      };
+    }
+    return { id: "gemini", apiKey: geminiApiKey, model: GEMINI_MODEL, name: "Gemini" };
+  }
+  function missingKeyError(provider) {
+    return `Set your ${provider.name} API key in the side panel settings first.`;
+  }
+  function streamWithProvider(provider, options) {
+    if (provider.id === "openrouter") {
+      return callOpenRouterStreaming({ ...options, apiKey: provider.apiKey, model: provider.model });
+    }
+    return callGeminiStreaming({ ...options, apiKey: provider.apiKey, model: provider.model });
+  }
   async function setupSidePanel() {
     try {
       await chrome.sidePanel?.setOptions?.({ path: "popup.html", enabled: true });
       await chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true });
     } catch (err) {
-      console.error("[YT Summarizer] side panel setup:", err);
+      console.error("[Summarizer] side panel setup:", err);
     }
   }
   chrome.runtime.onInstalled.addListener(setupSidePanel);
   chrome.runtime.onStartup.addListener(setupSidePanel);
-  async function setSessionState(state) {
+  async function getAllTabStates() {
     try {
-      await chrome.storage.session.set({ [SESSION_KEY]: state });
-    } catch (e) {
-      console.error("[YT Summarizer] session set:", e);
+      const r = await chrome.storage.session.get([TAB_STATES_KEY]);
+      return r?.[TAB_STATES_KEY] || {};
+    } catch (_) {
+      return {};
     }
+  }
+  async function setAllTabStates(all) {
     try {
-      chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state }, () => {
+      await chrome.storage.session.set({ [TAB_STATES_KEY]: all });
+    } catch (e) {
+      console.error("[Summarizer] session set:", e);
+    }
+  }
+  async function getTabState(tabId) {
+    if (tabId == null) return null;
+    const all = await getAllTabStates();
+    return all[tabId] || null;
+  }
+  async function setTabState(tabId, state) {
+    if (tabId == null) return;
+    const all = await getAllTabStates();
+    all[tabId] = { ...state, tabId };
+    await setAllTabStates(all);
+  }
+  async function patchTabState(tabId, patch) {
+    if (tabId == null) return null;
+    const all = await getAllTabStates();
+    const next = { ...all[tabId] || {}, ...patch, tabId };
+    all[tabId] = next;
+    await setAllTabStates(all);
+    return next;
+  }
+  async function deleteTabState(tabId) {
+    const all = await getAllTabStates();
+    if (tabId in all) {
+      delete all[tabId];
+      await setAllTabStates(all);
+    }
+  }
+  var CHAT_CACHE_KEY = "chatsBySource";
+  var CHAT_CACHE_MAX = 20;
+  async function getCachedChat(sourceKey) {
+    if (!sourceKey) return null;
+    try {
+      const r = await chrome.storage.session.get([CHAT_CACHE_KEY]);
+      return r?.[CHAT_CACHE_KEY]?.[sourceKey] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  async function setCachedChat(sourceKey, chat) {
+    if (!sourceKey || !chat) return;
+    try {
+      const r = await chrome.storage.session.get([CHAT_CACHE_KEY]);
+      const all = r?.[CHAT_CACHE_KEY] || {};
+      delete all[sourceKey];
+      all[sourceKey] = chat;
+      const keys = Object.keys(all);
+      while (keys.length > CHAT_CACHE_MAX) delete all[keys.shift()];
+      await chrome.storage.session.set({ [CHAT_CACHE_KEY]: all });
+    } catch (e) {
+      console.error("[Summarizer] chat cache set:", e);
+    }
+  }
+  async function getActiveTab() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      return tab || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  function withPending(state) {
+    const entry = state?.sourceKey ? activeChats.get(state.sourceKey) : null;
+    if (!entry) return state;
+    return {
+      ...state,
+      pendingChat: {
+        history: entry.request.history,
+        bubbles: entry.request.bubbles || [],
+        accumulated: entry.accumulated
+      }
+    };
+  }
+  function broadcast(state) {
+    try {
+      chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state: withPending(state) }, () => {
         void chrome.runtime?.lastError;
       });
     } catch (_) {
     }
   }
-  async function getSessionState() {
+  async function broadcastIfActive(tabId, state) {
+    const active = await getActiveTab();
+    if (active?.id === tabId) broadcast({ ...state, tabId });
+  }
+  function classify(url) {
+    if (!url || !/^https?:\/\//i.test(url)) return "unsupported";
+    if (isWatchUrl(url)) return "youtube";
+    if (/^https?:\/\/(?:[^/]*\.)?youtube\.com\//i.test(url) || /^https?:\/\/youtu\.be\//i.test(url))
+      return "youtube-other";
+    return "page";
+  }
+  async function ensureTabState(tab) {
+    if (!tab || tab.id == null) return;
+    const tabId = tab.id;
+    const url = tab.url || "";
+    const kind = classify(url);
+    const cached = await getTabState(tabId);
+    if (cached && cached.url === url && cached.status && cached.status !== "loading-page") {
+      broadcast({ ...cached, tabId });
+      return;
+    }
+    if (kind === "page") {
+      const loading = { tabId, url, kind, status: "loading-page", title: tab.title || url };
+      await setTabState(tabId, loading);
+      await broadcastIfActive(tabId, loading);
+      if (tab.status && tab.status !== "complete") return;
+      const extracted = await extractPage(tabId);
+      let next;
+      if (extracted && extracted.text && extracted.text.trim().length > 20) {
+        const sourceKey = "page:" + url;
+        next = {
+          tabId,
+          url,
+          kind: "page",
+          status: "page_ready",
+          title: extracted.title || tab.title || url,
+          pageText: clampPageText(extracted.text),
+          sourceKey,
+          // Returning to an already-discussed page revives its conversation.
+          chat: await getCachedChat(sourceKey)
+        };
+      } else {
+        next = {
+          tabId,
+          url,
+          kind: "page",
+          status: "error",
+          title: tab.title || url,
+          error: "Couldn't read this page's text to summarize it."
+        };
+      }
+      await setTabState(tabId, next);
+      await broadcastIfActive(tabId, next);
+      return;
+    }
+    if (kind === "youtube") {
+      const placeholder = cached?.kind === "youtube" ? cached : { tabId, url, kind, status: "idle", title: tab.title || "" };
+      broadcast({ ...placeholder, tabId });
+      return;
+    }
+    const hint = kind === "youtube-other" ? "Open a YouTube video, or switch to an article to summarize it." : "This page can't be summarized. Open a webpage or a YouTube video.";
+    const idle = { tabId, url, kind, status: "idle", title: tab.title || "", hint };
+    await setTabState(tabId, idle);
+    await broadcastIfActive(tabId, idle);
+  }
+  async function extractPage(tabId) {
     try {
-      const r = await chrome.storage.session.get([SESSION_KEY]);
-      return r?.[SESSION_KEY] || null;
-    } catch (_) {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: extractPageContent
+      });
+      return results?.[0]?.result || null;
+    } catch (e) {
+      console.debug("[Summarizer] page extract failed:", e?.message || e);
       return null;
+    }
+  }
+  async function syncActiveTab() {
+    const tab = await getActiveTab();
+    if (tab) await ensureTabState(tab);
+  }
+  chrome.tabs?.onActivated?.addListener(() => {
+    syncActiveTab();
+  });
+  chrome.windows?.onFocusChanged?.addListener(() => {
+    syncActiveTab();
+  });
+  chrome.tabs?.onUpdated?.addListener((tabId, info, tab) => {
+    getActiveTab().then((active) => {
+      if (!active || active.id !== tabId) {
+        if (info.url) deleteTabState(tabId);
+        return;
+      }
+      if (info.url || info.status === "complete") ensureTabState(tab);
+    });
+  });
+  chrome.tabs?.onRemoved?.addListener((tabId) => {
+    deleteTabState(tabId);
+  });
+  chrome.commands?.onCommand?.addListener((command) => {
+    if (command === "open_side_panel") openSidePanelForActiveTab();
+  });
+  async function openSidePanelForActiveTab() {
+    const tab = await getActiveTab();
+    try {
+      const opts = tab?.windowId != null ? { windowId: tab.windowId } : tab?.id != null ? { tabId: tab.id } : {};
+      await chrome.sidePanel?.open?.(opts);
+      if (tab) ensureTabState(tab);
+    } catch (e) {
+      console.debug("[Summarizer] open via shortcut failed:", e?.message || e);
     }
   }
   var YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
   var activeRequests = /* @__PURE__ */ new Map();
-  var activeChatController = null;
+  var activeChats = /* @__PURE__ */ new Map();
+  var anonChatSeq = 0;
   function cancelRequest(videoId) {
     const controller = videoId && activeRequests.get(videoId);
     if (controller) {
@@ -220,7 +559,11 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         sendResponse?.({ ok: true });
         return false;
       case MSG.PUBLISH_SUMMARY:
-        setSessionState(message.payload);
+        handlePublish(message.payload, sender);
+        sendResponse?.({ ok: true });
+        return false;
+      case MSG.SAVE_CHAT:
+        handleSaveChat(message, sender);
         sendResponse?.({ ok: true });
         return false;
       case MSG.OPEN_SIDE_PANEL:
@@ -228,7 +571,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         return true;
       // async response
       case MSG.SUMMARY_STATE_REQUEST:
-        getSessionState().then((state) => sendResponse({ ok: true, state }));
+        handleStateRequest(sendResponse);
         return true;
       // async response
       case MSG.CHAT_MESSAGE:
@@ -236,9 +579,10 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         return true;
       // async response
       case MSG.CHAT_STOP:
-        if (activeChatController) {
-          activeChatController.abort();
-          activeChatController = null;
+        if (message.sourceKey) {
+          activeChats.get(message.sourceKey)?.controller.abort();
+        } else {
+          for (const entry of activeChats.values()) entry.controller.abort();
         }
         sendResponse?.({ ok: true });
         return false;
@@ -246,18 +590,54 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         return false;
     }
   });
+  async function handlePublish(payload, sender) {
+    const tabId = sender?.tab?.id;
+    if (tabId == null || !payload) return;
+    const prev = await getTabState(tabId);
+    const next = { ...prev || {}, ...payload, tabId, kind: "youtube" };
+    if (payload.videoId && prev?.videoId && payload.videoId !== prev.videoId) {
+      next.chat = null;
+    }
+    if (payload.videoId) next.sourceKey = "yt:" + payload.videoId;
+    if (!next.chat && next.sourceKey) next.chat = await getCachedChat(next.sourceKey);
+    await setTabState(tabId, next);
+    await broadcastIfActive(tabId, next);
+  }
+  async function handleSaveChat(message, sender) {
+    const tabId = message.tabId ?? sender?.tab?.id ?? (await getActiveTab())?.id;
+    if (tabId == null) return;
+    const next = await patchTabState(tabId, { chat: message.chat || null });
+    if (next?.sourceKey && message.chat) await setCachedChat(next.sourceKey, message.chat);
+  }
+  async function handleStateRequest(sendResponse) {
+    const tab = await getActiveTab();
+    if (!tab) {
+      sendResponse({ ok: true, state: null });
+      return;
+    }
+    const state = await getTabState(tab.id);
+    sendResponse({ ok: true, state: state ? withPending({ ...state, tabId: tab.id }) : null });
+    ensureTabState(tab);
+  }
   async function handleGenerate(message, sender, sendResponse) {
     try {
       if (message.videoUrl && !YOUTUBE_DOMAIN_RE.test(message.videoUrl)) {
         sendResponse({ ok: false, error: "Invalid video URL." });
         return;
       }
-      const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-      if (!geminiApiKey) {
-        sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+      const provider = await getProvider();
+      if (!provider.apiKey) {
+        sendResponse({ ok: false, error: missingKeyError(provider) });
         return;
       }
       const mode = message.transcript?.trim() ? "transcript" : "video";
+      if (mode === "video" && provider.id === "openrouter") {
+        sendResponse({
+          ok: false,
+          error: "OpenRouter needs captions for YouTube videos. Switch to Gemini to use the video fallback."
+        });
+        return;
+      }
       const body = buildRequestBody({
         mode,
         title: message.title,
@@ -270,9 +650,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       if (videoId) activeRequests.set(videoId, controller);
       let finalText = "";
       try {
-        finalText = await callGeminiStreaming({
-          apiKey: geminiApiKey,
-          model: GEMINI_MODEL,
+        finalText = await streamWithProvider(provider, {
           body,
           signal: controller.signal,
           onChunk: (accumulated) => {
@@ -298,7 +676,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         if (videoId) activeRequests.delete(videoId);
       }
       if (!finalText) {
-        sendResponse({ ok: false, error: "Gemini returned no summary (response may have been blocked)." });
+        sendResponse({ ok: false, error: `${provider.name} returned no summary (response may have been blocked).` });
         return;
       }
       sendResponse({ ok: true, text: finalText, mode });
@@ -312,35 +690,61 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       parts: [{ text: msg.text }]
     }));
   }
+  async function persistChatResult(request, text) {
+    const { sourceKey, tabId, history, bubbles, context, isSummary } = request;
+    const summaryContext = { ...context || {} };
+    if (isSummary) summaryContext.summary = text;
+    const chat = {
+      history: [...history || [], { role: "model", text }],
+      bubbles: [...bubbles || [], { role: "model", text }],
+      summaryContext
+    };
+    if (!sourceKey) return chat;
+    await setCachedChat(sourceKey, chat);
+    if (tabId != null) {
+      const st = await getTabState(tabId);
+      if (st?.sourceKey === sourceKey) await patchTabState(tabId, { chat });
+    }
+    return chat;
+  }
+  function notifyChatDone(payload) {
+    if (!payload.sourceKey) return;
+    try {
+      chrome.runtime.sendMessage({ type: MSG.CHAT_DONE, ...payload }, () => {
+        void chrome.runtime?.lastError;
+      });
+    } catch (_) {
+    }
+  }
   async function handleChat(message, sender, sendResponse) {
     try {
-      const { geminiApiKey } = await storageGet(["geminiApiKey"]);
-      if (!geminiApiKey) {
-        sendResponse({ ok: false, error: "Set your Gemini API key in the side panel first." });
+      const provider = await getProvider();
+      if (!provider.apiKey) {
+        sendResponse({ ok: false, error: missingKeyError(provider) });
         return;
       }
-      const { history } = message;
+      const { history, sourceKey } = message;
       if (!history?.length) {
         sendResponse({ ok: false, error: "No message to send." });
         return;
       }
-      const contents = buildChatContents(history);
       const body = {
-        contents,
+        contents: buildChatContents(history),
         generationConfig: CHAT_GENERATION_CONFIG
       };
-      activeChatController = new AbortController();
-      const signal = activeChatController.signal;
+      const chatKey = sourceKey || "anon:" + ++anonChatSeq;
+      const controller = new AbortController();
+      const entry = { controller, accumulated: "", request: message };
+      activeChats.set(chatKey, entry);
       try {
-        const finalText = await callGeminiStreaming({
-          apiKey: geminiApiKey,
-          model: GEMINI_MODEL,
+        const finalText = await streamWithProvider(provider, {
           body,
-          signal,
+          signal: controller.signal,
           onChunk: (accumulated) => {
+            entry.accumulated = accumulated;
             try {
               chrome.runtime.sendMessage(
-                { type: MSG.CHAT_PROGRESS, text: accumulated },
+                { type: MSG.CHAT_PROGRESS, text: accumulated, sourceKey },
                 () => {
                   void chrome.runtime?.lastError;
                 }
@@ -349,15 +753,20 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
             }
           }
         });
+        const chat = await persistChatResult(message, finalText);
+        notifyChatDone({ sourceKey, ok: true, text: finalText, chat });
         sendResponse({ ok: true, text: finalText });
       } catch (e) {
-        if (activeChatController?.signal.aborted || e?.name === "AbortError") {
+        if (controller.signal.aborted || e?.name === "AbortError") {
+          const chat = entry.accumulated ? await persistChatResult(message, entry.accumulated) : null;
+          notifyChatDone({ sourceKey, cancelled: true, text: entry.accumulated, chat });
           sendResponse({ ok: false, cancelled: true });
           return;
         }
+        notifyChatDone({ sourceKey, ok: false, error: e?.message || "Chat failed." });
         sendResponse({ ok: false, error: e?.message || "Chat failed." });
       } finally {
-        activeChatController = null;
+        if (activeChats.get(chatKey) === entry) activeChats.delete(chatKey);
       }
     } catch (e) {
       sendResponse({ ok: false, error: e?.message || "Unexpected chat error." });
@@ -365,13 +774,17 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
   }
   async function openSidePanel(sender) {
     try {
+      const active = await getActiveTab();
+      if (sender?.tab?.id != null && active && active.id !== sender.tab.id) {
+        return false;
+      }
       const opts = {};
       if (sender?.tab?.windowId != null) opts.windowId = sender.tab.windowId;
       else if (sender?.tab?.id != null) opts.tabId = sender.tab.id;
       await chrome.sidePanel?.open?.(opts);
       return true;
     } catch (e) {
-      console.debug("[YT Summarizer] sidePanel.open skipped:", e?.message || e);
+      console.debug("[Summarizer] sidePanel.open skipped:", e?.message || e);
       return false;
     }
   }

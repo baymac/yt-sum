@@ -46,7 +46,16 @@ export function makeChrome(initial = {}) {
 			onStartup: { addListener: vi.fn() },
 			lastError: undefined,
 		},
-		tabs: { query: vi.fn(), sendMessage: vi.fn() },
+		tabs: {
+			query: vi.fn(async () => []),
+			sendMessage: vi.fn(),
+			onActivated: { addListener: vi.fn() },
+			onUpdated: { addListener: vi.fn() },
+			onRemoved: { addListener: vi.fn() },
+		},
+		windows: { onFocusChanged: { addListener: vi.fn() } },
+		commands: { onCommand: { addListener: vi.fn() } },
+		scripting: { executeScript: vi.fn(async () => [{ result: { title: "", text: "", url: "" } }]) },
 		sidePanel: { setOptions: vi.fn(), setPanelBehavior: vi.fn(), open: vi.fn() },
 	};
 }

@@ -1,15 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makeChrome } from "../setup.js";
-import { MSG, SESSION_KEY } from "../../src/lib/messages.js";
+import { MSG, TAB_STATES_KEY } from "../../src/lib/messages.js";
 
 // Load background.js fresh with a chrome mock whose onMessage.addListener we
 // capture, so we can drive the message hub directly.
 async function loadBackground(initial = { geminiApiKey: "k" }) {
 	vi.resetModules();
 	let listener;
+	let commandListener;
 	const chrome = makeChrome(initial);
 	chrome.runtime.onMessage.addListener = vi.fn((cb) => {
 		listener = cb;
+	});
+	chrome.commands.onCommand.addListener = vi.fn((cb) => {
+		commandListener = cb;
 	});
 	globalThis.chrome = chrome;
 	await import("../../src/background.js");
@@ -18,14 +22,31 @@ async function loadBackground(initial = { geminiApiKey: "k" }) {
 			const isAsync = listener(msg, sender, resolve);
 			if (isAsync !== true) resolve(undefined);
 		});
+	const runCommand = (name) => commandListener?.(name);
 	const flush = () => new Promise((r) => setTimeout(r, 0));
-	return { chrome, invoke, flush };
+	return { chrome, invoke, runCommand, flush };
 }
 
 // Mock a streaming SSE response for callGeminiStreaming.
 const sseOk = (text) => {
 	const chunk = new TextEncoder().encode(
 		`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] })}\n\n`,
+	);
+	return {
+		ok: true,
+		status: 200,
+		body: new ReadableStream({
+			start(controller) {
+				controller.enqueue(chunk);
+				controller.close();
+			},
+		}),
+	};
+};
+
+const openRouterSseOk = (text) => {
+	const chunk = new TextEncoder().encode(
+		`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\ndata: [DONE]\n\n`,
 	);
 	return {
 		ok: true,
@@ -62,24 +83,79 @@ describe("background message hub", () => {
 		expect(resp.error).toMatch(/api key/i);
 	});
 
-	it("PUBLISH_SUMMARY stores session state and broadcasts SUMMARY_READY", async () => {
+	it("CHAT_MESSAGE sends OpenRouter's selected model and key", async () => {
+		globalThis.fetch = vi.fn(async () => openRouterSseOk("OPENROUTER"));
+		const { invoke } = await loadBackground({
+			aiProvider: "openrouter",
+			openRouterApiKey: "or-key",
+			openRouterModel: "anthropic/claude-3.5-sonnet",
+		});
+		const resp = await invoke({ type: MSG.CHAT_MESSAGE, history: [{ role: "user", text: "Q" }] });
+		expect(resp).toEqual({ ok: true, text: "OPENROUTER" });
+		expect(globalThis.fetch.mock.calls[0][1].headers.Authorization).toBe("Bearer or-key");
+		const sentBody = JSON.parse(globalThis.fetch.mock.calls[0][1].body);
+		expect(sentBody.model).toBe("anthropic/claude-3.5-sonnet");
+		expect(sentBody.messages).toEqual([{ role: "user", content: "Q" }]);
+	});
+
+	it("PUBLISH_SUMMARY stores per-tab state and broadcasts when the tab is active", async () => {
 		const { chrome, invoke, flush } = await loadBackground();
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, windowId: 1, url: "https://www.youtube.com/watch?v=abc" }]);
 		const payload = { status: "done", videoId: "abc", title: "T", text: "S", mode: "transcript" };
-		await invoke({ type: MSG.PUBLISH_SUMMARY, payload });
+		await invoke({ type: MSG.PUBLISH_SUMMARY, payload }, { tab: { id: 7 } });
 		await flush();
-		expect(chrome.storage.session._data[SESSION_KEY]).toEqual(payload);
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7]).toMatchObject({
+			...payload,
+			tabId: 7,
+			kind: "youtube",
+			sourceKey: "yt:abc",
+		});
 		const broadcast = chrome.runtime.sendMessage.mock.calls.find(
 			(c) => c[0]?.type === MSG.SUMMARY_READY,
 		);
-		expect(broadcast?.[0].state).toEqual(payload);
+		expect(broadcast?.[0].state).toMatchObject(payload);
 	});
 
-	it("SUMMARY_STATE_REQUEST returns the stored state", async () => {
+	it("PUBLISH_SUMMARY from a background tab caches but does NOT broadcast", async () => {
+		const { chrome, invoke, flush } = await loadBackground();
+		// Active tab is 7; the publish comes from tab 9 (a background tab).
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url: "https://www.youtube.com/watch?v=front" }]);
+		const payload = { status: "done", videoId: "bg", title: "BG", text: "S" };
+		await invoke({ type: MSG.PUBLISH_SUMMARY, payload }, { tab: { id: 9 } });
+		await flush();
+		expect(chrome.storage.session._data[TAB_STATES_KEY][9]).toMatchObject({ videoId: "bg", tabId: 9 });
+		const broadcast = chrome.runtime.sendMessage.mock.calls.find(
+			(c) => c[0]?.type === MSG.SUMMARY_READY,
+		);
+		expect(broadcast).toBeUndefined();
+	});
+
+	it("SUMMARY_STATE_REQUEST returns the active tab's stored state", async () => {
 		const { chrome, invoke } = await loadBackground();
-		const state = { status: "done", videoId: "z", text: "S" };
-		chrome.storage.session._data[SESSION_KEY] = state;
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url: "https://example.com/a" }]);
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "done", videoId: "z", text: "S", url: "https://example.com/a", tabId: 7 },
+		};
 		const resp = await invoke({ type: MSG.SUMMARY_STATE_REQUEST });
-		expect(resp).toEqual({ ok: true, state });
+		expect(resp.ok).toBe(true);
+		expect(resp.state).toMatchObject({ status: "done", text: "S", tabId: 7 });
+	});
+
+	it("SAVE_CHAT persists the chat onto the tab's state", async () => {
+		const { chrome, invoke, flush } = await loadBackground();
+		chrome.storage.session._data[TAB_STATES_KEY] = { 7: { status: "page_ready", url: "u", tabId: 7 } };
+		const chat = { history: [{ role: "user", text: "hi" }], bubbles: [], summaryContext: { title: "", summary: "" } };
+		await invoke({ type: MSG.SAVE_CHAT, tabId: 7, chat });
+		await flush();
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7].chat).toEqual(chat);
+	});
+
+	it("open_side_panel command opens the panel for the active tab's window", async () => {
+		const { chrome, runCommand, flush } = await loadBackground();
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, windowId: 3, url: "https://example.com/a" }]);
+		runCommand("open_side_panel");
+		await flush();
+		expect(chrome.sidePanel.open).toHaveBeenCalledWith({ windowId: 3 });
 	});
 
 	it("OPEN_SIDE_PANEL opens the panel and reports opened:true", async () => {
@@ -226,6 +302,118 @@ describe("background message hub", () => {
 
 		await chatPromise;
 		expect(chatResp).toEqual({ ok: false, cancelled: true });
+	});
+
+	it("CHAT_MESSAGE with a sourceKey caches the finished chat and broadcasts CHAT_DONE", async () => {
+		const { chrome, invoke } = await loadBackground();
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "page_ready", url: "u", sourceKey: "page:u", tabId: 7 },
+		};
+		const resp = await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: { title: "T", summary: "" },
+			sourceKey: "page:u",
+			tabId: 7,
+			bubbles: [{ role: "user", text: "Q" }],
+			isSummary: true,
+		});
+		expect(resp).toEqual({ ok: true, text: "SUMMARY" });
+
+		// The finished conversation is cached by source and patched onto the tab.
+		const cached = chrome.storage.session._data.chatsBySource["page:u"];
+		expect(cached.history.at(-1)).toEqual({ role: "model", text: "SUMMARY" });
+		expect(cached.bubbles.at(-1)).toEqual({ role: "model", text: "SUMMARY" });
+		expect(cached.summaryContext.summary).toBe("SUMMARY");
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7].chat).toEqual(cached);
+
+		const done = chrome.runtime.sendMessage.mock.calls.find((c) => c[0]?.type === MSG.CHAT_DONE);
+		expect(done?.[0]).toMatchObject({ sourceKey: "page:u", ok: true, text: "SUMMARY" });
+	});
+
+	it("a finished chat is not patched onto a tab that meanwhile navigated to another source", async () => {
+		const { chrome, invoke } = await loadBackground();
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "page_ready", url: "other", sourceKey: "page:other", tabId: 7 },
+		};
+		await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: {},
+			sourceKey: "page:u",
+			tabId: 7,
+			bubbles: [],
+		});
+		// Cached by source for when the user comes back…
+		expect(chrome.storage.session._data.chatsBySource["page:u"]).toBeTruthy();
+		// …but the tab now shows a different page, so its state is untouched.
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7].chat).toBeUndefined();
+	});
+
+	it("SUMMARY_STATE_REQUEST re-resolving a page attaches its cached chat", async () => {
+		const { chrome, invoke, flush } = await loadBackground();
+		const url = "https://example.com/a";
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url, status: "complete" }]);
+		chrome.scripting.executeScript = vi.fn(async () => [
+			{ result: { title: "A", text: "long enough article body text here", url } },
+		]);
+		const chat = {
+			history: [{ role: "user", text: "p" }, { role: "model", text: "CACHED SUMMARY" }],
+			bubbles: [{ role: "model", text: "CACHED SUMMARY" }],
+			summaryContext: { title: "A", summary: "CACHED SUMMARY" },
+		};
+		chrome.storage.session._data.chatsBySource = { ["page:" + url]: chat };
+
+		await invoke({ type: MSG.SUMMARY_STATE_REQUEST });
+		await flush();
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7]).toMatchObject({
+			status: "page_ready",
+			sourceKey: "page:" + url,
+			chat,
+		});
+	});
+
+	it("SUMMARY_STATE_REQUEST mid-stream attaches pendingChat with the accumulated text", async () => {
+		let release;
+		globalThis.fetch = vi.fn(async () => ({
+			ok: true,
+			status: 200,
+			body: new ReadableStream({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode(
+						`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "PARTIAL" }] } }] })}\n\n`,
+					));
+					release = () => controller.close();
+				},
+			}),
+		}));
+		const { chrome, invoke, flush } = await loadBackground();
+		const url = "https://example.com/a";
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url, status: "complete" }]);
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "page_ready", url, sourceKey: "page:" + url, tabId: 7 },
+		};
+
+		const chatPromise = invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: {},
+			sourceKey: "page:" + url,
+			tabId: 7,
+			bubbles: [{ role: "user", text: "Q" }],
+		});
+		await flush();
+		await flush();
+
+		const resp = await invoke({ type: MSG.SUMMARY_STATE_REQUEST });
+		expect(resp.state.pendingChat).toMatchObject({
+			accumulated: "PARTIAL",
+			bubbles: [{ role: "user", text: "Q" }],
+		});
+
+		release();
+		const final = await chatPromise;
+		expect(final).toEqual({ ok: true, text: "PARTIAL" });
 	});
 
 	it("CHAT_STOP with no active chat still responds ok", async () => {

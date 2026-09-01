@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YouTube Summarizer</title>
+  <title>Page &amp; Video Summarizer</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     body {
@@ -64,7 +64,7 @@
 
     .form-group { margin-bottom: 18px; }
     label { display: block; margin-bottom: 6px; font-weight: 500; color: #555; font-size: 13px; }
-    input[type="text"], input[type="password"] {
+    input[type="text"], input[type="password"], select {
       width: 100%; padding: 9px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;
     }
     input:focus { outline: none; border-color: #1976d2; box-shadow: 0 0 0 2px rgba(25,118,210,.1); }
@@ -89,13 +89,16 @@
     .chat-divider { border: none; border-top: 1px solid #eee; margin: 16px 0; }
     .chat-messages { display: flex; flex-direction: column; gap: 10px; }
     .chat-bubble { padding: 9px 12px; border-radius: 10px; font-size: 13px; line-height: 1.6; max-width: 88%; word-break: break-word; display: flex; flex-direction: column; }
-    .chat-copy-btn { align-self: flex-start; margin-top: 7px; background: rgba(0,0,0,.08); color: inherit; border: none; font: inherit; font-size: 11px; line-height: 1; padding: 4px 9px; border-radius: 5px; cursor: pointer; opacity: .65; transition: opacity .15s, background-color .15s; }
-    .chat-copy-btn:hover { opacity: 1; }
-    .chat-copy-btn.copied { background: #2e7d32; color: #fff; opacity: 1; }
-    .chat-bubble-user .chat-copy-btn { align-self: flex-end; background: rgba(255,255,255,.25); color: #fff; }
-    .chat-bubble-empty .chat-copy-btn { display: none; }
-    body.dark-mode .chat-copy-btn { background: rgba(255,255,255,.12); }
-    body.dark-mode .chat-copy-btn.copied { background: #2e7d32; }
+    .chat-actions { display: flex; gap: 6px; margin-top: 7px; align-self: flex-start; }
+    .chat-bubble-user .chat-actions { align-self: flex-end; }
+    .chat-bubble-empty .chat-actions { display: none; }
+    .chat-copy-btn, .chat-export-btn { background: rgba(0,0,0,.08); color: inherit; border: none; font: inherit; font-size: 11px; line-height: 1; padding: 4px 9px; border-radius: 5px; cursor: pointer; opacity: .65; transition: opacity .15s, background-color .15s; }
+    .chat-copy-btn:hover, .chat-export-btn:hover { opacity: 1; }
+    .chat-copy-btn.copied, .chat-export-btn.copied { background: #2e7d32; color: #fff; opacity: 1; }
+    .chat-export-btn:disabled { cursor: default; opacity: .5; }
+    .chat-bubble-user .chat-copy-btn { background: rgba(255,255,255,.25); color: #fff; }
+    body.dark-mode .chat-copy-btn, body.dark-mode .chat-export-btn { background: rgba(255,255,255,.12); }
+    body.dark-mode .chat-copy-btn.copied, body.dark-mode .chat-export-btn.copied { background: #2e7d32; }
     .chat-bubble-user { align-self: flex-end; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; border-bottom-right-radius: 3px; }
     .chat-bubble-model { align-self: flex-start; background: #f3f4f6; color: #222; border-bottom-left-radius: 3px; }
     .chat-bubble-model h1, .chat-bubble-model h2, .chat-bubble-model h3 { font-size: 13px; font-weight: 600; margin: 6px 0 3px; }
@@ -128,12 +131,15 @@
     body.chat-active .chat-divider { display: none; }
     #chatMessages { flex: 1; overflow-y: auto; padding: 8px 16px; }
     .chat-input-area { flex-shrink: 0; padding: 8px 16px 16px; background: #fff; }
+    /* Pinned at the top of the chat column (above the scrolling messages), so it
+       stays put until the one-shot click hides it — the messages scroll under it. */
     .chat-summarize-btn {
-      display: block; width: 100%;
+      flex-shrink: 0;
+      display: block; width: auto;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       color: #fff; border: none; padding: 10px 16px; border-radius: 8px;
       font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity .2s;
-      margin-bottom: 8px;
+      margin: 10px 16px 8px;
     }
     .chat-summarize-btn:hover { opacity: .92; }
     /* `display:block` above would otherwise beat the UA [hidden] rule, leaving the
@@ -145,6 +151,18 @@
       padding: 4px 10px; font-size: 12px; font-weight: 500;
     }
 
+    /* The Summarize prompt bubble: a compact ~2-line box that expands on click. */
+    .collapsible-msg { cursor: pointer; border-radius: 8px; }
+    .collapsible-msg:hover { background: rgba(255,255,255,.08); }
+    .collapsible-preview {
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+      overflow: hidden; line-height: 1.45;
+    }
+    .collapsible-msg:not(.collapsed) .collapsible-preview { display: none; }
+    .collapsible-msg.collapsed .collapsible-full { display: none; }
+    .collapsible-hint { opacity: .75; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    .collapsible-full > :first-child { margin-top: 0; }
+
     /* Dark mode */
     body.dark-mode { background: #1e1e1e; color: #e0e0e0; }
     body.dark-mode .panel-header { background: #1e1e1e; border-bottom-color: #333; }
@@ -153,7 +171,7 @@
     body.dark-mode .summary-body code { background: #2d2d2d; }
     body.dark-mode .summary-body a, body.dark-mode a { color: #64b5f6; }
     body.dark-mode label { color: #b0b0b0; }
-    body.dark-mode input[type="text"], body.dark-mode input[type="password"] { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
+    body.dark-mode input[type="text"], body.dark-mode input[type="password"], body.dark-mode select { background: #2d2d2d; border-color: #444; color: #e0e0e0; }
     body.dark-mode .dark-mode-toggle { background: #2d2d2d; }
     body.dark-mode .help-text { color: #888; }
     body.dark-mode .hint, body.dark-mode .summary-status { color: #aaa; }
@@ -177,17 +195,17 @@
       <div id="summaryStatus" class="summary-status"></div>
       <div id="summaryBody" class="summary-body"></div>
       <p id="idleHint" class="hint">
-        Open a YouTube video — the transcript loads automatically. You can also use the
-        <strong>📝 Summarize</strong> button on any thumbnail in your feed.
+        Open a YouTube video or any article and it loads automatically here — then hit
+        <strong>Summarize</strong>, or just start asking questions about the page.
       </p>
     </div>
     <div id="chatSection" hidden>
       <div class="chat-divider"></div>
+      <button id="summarizeForChatBtn" class="chat-summarize-btn" hidden>Summarize</button>
       <div id="chatMessages" class="chat-messages"></div>
       <div class="chat-input-area" id="chatInputArea">
-        <button id="summarizeForChatBtn" class="chat-summarize-btn" hidden>Summarize</button>
         <div class="chat-input-row">
-          <textarea id="chatInput" class="chat-input" placeholder="Ask about this video…" aria-label="Ask about this video" rows="1"></textarea>
+          <textarea id="chatInput" class="chat-input" placeholder="Ask about this page…" aria-label="Ask about this page" rows="1"></textarea>
           <button id="chatSendBtn" class="chat-send-btn">Send</button>
         </div>
       </div>
@@ -200,15 +218,27 @@
       <div id="darkModeToggle" class="toggle-switch" role="switch" tabindex="0"></div>
     </div>
     <div class="form-group">
-      <label for="apiKey">Gemini API Key</label>
+      <label for="provider">AI Provider</label>
+      <select id="provider">
+        <option value="gemini">Google Gemini</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label for="apiKey" id="apiKeyLabel">Gemini API Key</label>
       <input type="password" id="apiKey" placeholder="Enter your Google Gemini API key" autocomplete="off">
-      <div class="help-text">
+      <div class="help-text" id="apiKeyHelp">
         Get a free key from
         <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Google AI Studio</a>.
         Stored only in your browser.
       </div>
     </div>
-    <button id="saveBtn">Save API Key</button>
+    <div class="form-group" id="openRouterModelGroup" hidden>
+      <label for="openRouterModel">OpenRouter model</label>
+      <input type="text" id="openRouterModel" placeholder="e.g. openai/gpt-4o-mini" autocomplete="off">
+      <div class="help-text">Enter any model ID available to your OpenRouter key.</div>
+    </div>
+    <button id="saveBtn">Save settings</button>
     <div id="status" class="status"></div>
   </section>
 
