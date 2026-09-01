@@ -446,9 +446,7 @@ ${clampPageText(pageText)}`;
     }
     function makeFilename(title) {
       const safe = (title || "Summary").replace(/[\\/:*?"<>|#^[\]]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || "Summary";
-      const d = /* @__PURE__ */ new Date();
-      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      return `${safe} ${stamp}.md`;
+      return `${safe}.md`;
     }
     function buildExportDoc(title, url, md) {
       const fm = [
