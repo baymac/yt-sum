@@ -304,6 +304,118 @@ describe("background message hub", () => {
 		expect(chatResp).toEqual({ ok: false, cancelled: true });
 	});
 
+	it("CHAT_MESSAGE with a sourceKey caches the finished chat and broadcasts CHAT_DONE", async () => {
+		const { chrome, invoke } = await loadBackground();
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "page_ready", url: "u", sourceKey: "page:u", tabId: 7 },
+		};
+		const resp = await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: { title: "T", summary: "" },
+			sourceKey: "page:u",
+			tabId: 7,
+			bubbles: [{ role: "user", text: "Q" }],
+			isSummary: true,
+		});
+		expect(resp).toEqual({ ok: true, text: "SUMMARY" });
+
+		// The finished conversation is cached by source and patched onto the tab.
+		const cached = chrome.storage.session._data.chatsBySource["page:u"];
+		expect(cached.history.at(-1)).toEqual({ role: "model", text: "SUMMARY" });
+		expect(cached.bubbles.at(-1)).toEqual({ role: "model", text: "SUMMARY" });
+		expect(cached.summaryContext.summary).toBe("SUMMARY");
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7].chat).toEqual(cached);
+
+		const done = chrome.runtime.sendMessage.mock.calls.find((c) => c[0]?.type === MSG.CHAT_DONE);
+		expect(done?.[0]).toMatchObject({ sourceKey: "page:u", ok: true, text: "SUMMARY" });
+	});
+
+	it("a finished chat is not patched onto a tab that meanwhile navigated to another source", async () => {
+		const { chrome, invoke } = await loadBackground();
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "page_ready", url: "other", sourceKey: "page:other", tabId: 7 },
+		};
+		await invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: {},
+			sourceKey: "page:u",
+			tabId: 7,
+			bubbles: [],
+		});
+		// Cached by source for when the user comes back…
+		expect(chrome.storage.session._data.chatsBySource["page:u"]).toBeTruthy();
+		// …but the tab now shows a different page, so its state is untouched.
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7].chat).toBeUndefined();
+	});
+
+	it("SUMMARY_STATE_REQUEST re-resolving a page attaches its cached chat", async () => {
+		const { chrome, invoke, flush } = await loadBackground();
+		const url = "https://example.com/a";
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url, status: "complete" }]);
+		chrome.scripting.executeScript = vi.fn(async () => [
+			{ result: { title: "A", text: "long enough article body text here", url } },
+		]);
+		const chat = {
+			history: [{ role: "user", text: "p" }, { role: "model", text: "CACHED SUMMARY" }],
+			bubbles: [{ role: "model", text: "CACHED SUMMARY" }],
+			summaryContext: { title: "A", summary: "CACHED SUMMARY" },
+		};
+		chrome.storage.session._data.chatsBySource = { ["page:" + url]: chat };
+
+		await invoke({ type: MSG.SUMMARY_STATE_REQUEST });
+		await flush();
+		expect(chrome.storage.session._data[TAB_STATES_KEY][7]).toMatchObject({
+			status: "page_ready",
+			sourceKey: "page:" + url,
+			chat,
+		});
+	});
+
+	it("SUMMARY_STATE_REQUEST mid-stream attaches pendingChat with the accumulated text", async () => {
+		let release;
+		globalThis.fetch = vi.fn(async () => ({
+			ok: true,
+			status: 200,
+			body: new ReadableStream({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode(
+						`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "PARTIAL" }] } }] })}\n\n`,
+					));
+					release = () => controller.close();
+				},
+			}),
+		}));
+		const { chrome, invoke, flush } = await loadBackground();
+		const url = "https://example.com/a";
+		chrome.tabs.query = vi.fn(async () => [{ id: 7, url, status: "complete" }]);
+		chrome.storage.session._data[TAB_STATES_KEY] = {
+			7: { status: "page_ready", url, sourceKey: "page:" + url, tabId: 7 },
+		};
+
+		const chatPromise = invoke({
+			type: MSG.CHAT_MESSAGE,
+			history: [{ role: "user", text: "Q" }],
+			context: {},
+			sourceKey: "page:" + url,
+			tabId: 7,
+			bubbles: [{ role: "user", text: "Q" }],
+		});
+		await flush();
+		await flush();
+
+		const resp = await invoke({ type: MSG.SUMMARY_STATE_REQUEST });
+		expect(resp.state.pendingChat).toMatchObject({
+			accumulated: "PARTIAL",
+			bubbles: [{ role: "user", text: "Q" }],
+		});
+
+		release();
+		const final = await chatPromise;
+		expect(final).toEqual({ ok: true, text: "PARTIAL" });
+	});
+
 	it("CHAT_STOP with no active chat still responds ok", async () => {
 		const { invoke } = await loadBackground();
 		const resp = await invoke({ type: MSG.CHAT_STOP });

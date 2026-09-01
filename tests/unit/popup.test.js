@@ -461,6 +461,99 @@ describe("popup page summary + per-tab chat cache", () => {
 	});
 });
 
+describe("popup summary survives navigation", () => {
+	beforeEach(() => {
+		globalThis.chrome = makeChrome({ geminiApiKey: "k" });
+	});
+
+	it("switching tabs mid-stream does NOT send CHAT_STOP (the background keeps going)", async () => {
+		const c = await loadPopupChat();
+		c.broadcast({ status: "page_ready", tabId: 1, kind: "page", title: "P", url: "https://ex.com/a", pageText: "BODY", sourceKey: "page:https://ex.com/a" });
+		document.getElementById("summarizeForChatBtn").click();
+		await flush();
+		expect(c.chatCalls).toHaveLength(1);
+		// The request carries the routing info the background needs to persist
+		// the result without the panel.
+		expect(c.chatCalls[0].msg).toMatchObject({ sourceKey: "page:https://ex.com/a", tabId: 1, isSummary: true });
+
+		c.broadcast({ status: "page_ready", tabId: 2, kind: "page", title: "Q", url: "https://ex.com/b", pageText: "B2", sourceKey: "page:https://ex.com/b" });
+		await flush();
+		expect(c.stopCalls).toHaveLength(0);
+	});
+
+	it("re-attaches to an in-flight stream via pendingChat and finalizes on CHAT_DONE", async () => {
+		const c = await loadPopupChat();
+		const key = "page:https://ex.com/a";
+		// The user comes back to a page whose summarize stream is still running.
+		c.broadcast({
+			status: "page_ready", tabId: 1, kind: "page", title: "P",
+			url: "https://ex.com/a", pageText: "BODY", sourceKey: key,
+			pendingChat: {
+				history: [{ role: "user", text: "PROMPT" }],
+				bubbles: [{ role: "user", text: "PROMPT", displayType: "transcript" }],
+				accumulated: "partial so far",
+			},
+		});
+		await flush();
+		expect(c.messagesText()).toContain("partial so far");
+		expect(c.sendBtn().textContent).toBe("Stop");
+
+		// Streaming continues into the re-attached bubble…
+		c.raw({ type: MSG.CHAT_PROGRESS, text: "partial so far and more", sourceKey: key });
+		await flush();
+		expect(c.messagesText()).toContain("and more");
+
+		// …and the background announces completion.
+		c.raw({
+			type: MSG.CHAT_DONE, sourceKey: key, ok: true, text: "FINAL SUMMARY",
+			chat: {
+				history: [{ role: "user", text: "PROMPT" }, { role: "model", text: "FINAL SUMMARY" }],
+				bubbles: [],
+				summaryContext: { title: "P", summary: "FINAL SUMMARY" },
+			},
+		});
+		await flush();
+		expect(c.messagesText()).toContain("FINAL SUMMARY");
+		expect(c.sendBtn().textContent).toBe("Send");
+	});
+
+	it("a CHAT_DONE for another source is ignored", async () => {
+		const c = await loadPopupChat();
+		c.broadcast({ status: "page_ready", tabId: 1, kind: "page", title: "P", url: "https://ex.com/a", pageText: "BODY", sourceKey: "page:https://ex.com/a" });
+		await c.typeAndSend("question");
+		c.raw({ type: MSG.CHAT_DONE, sourceKey: "page:https://ex.com/other", ok: true, text: "WRONG" });
+		await flush();
+		expect(c.messagesText()).not.toContain("WRONG");
+		expect(c.sendBtn().textContent).toBe("Stop");
+	});
+
+	it("navigating away and back in the same tab restores that page's cached chat", async () => {
+		const { broadcast } = await loadPopup();
+		broadcast({ status: "page_ready", tabId: 1, kind: "page", title: "A", url: "https://ex.com/a", pageText: "BODY", sourceKey: "page:https://ex.com/a" });
+		btn().click();
+		await flush();
+		expect(document.getElementById("chatMessages").textContent).toContain("Summary.");
+
+		// Same tab navigates to another page → fresh surface.
+		broadcast({ status: "page_ready", tabId: 1, kind: "page", title: "B", url: "https://ex.com/b", pageText: "B2", sourceKey: "page:https://ex.com/b" });
+		await flush();
+		expect(document.getElementById("chatMessages").textContent).not.toContain("Summary.");
+
+		// Back to the first page: the background re-resolves it with the cached chat.
+		broadcast({
+			status: "page_ready", tabId: 1, kind: "page", title: "A", url: "https://ex.com/a", pageText: "BODY", sourceKey: "page:https://ex.com/a",
+			chat: {
+				history: [{ role: "user", text: "p" }, { role: "model", text: "Summary." }],
+				bubbles: [{ role: "model", text: "Summary." }],
+				summaryContext: { title: "A", summary: "Summary." },
+			},
+		});
+		await flush();
+		expect(document.getElementById("chatMessages").textContent).toContain("Summary.");
+		expect(isHidden(btn())).toBe(true);
+	});
+});
+
 describe("popup collapsible summarize prompt", () => {
 	beforeEach(() => {
 		globalThis.chrome = makeChrome({ geminiApiKey: "k" });

@@ -116,6 +116,41 @@ async function deleteTabState(tabId) {
 	}
 }
 
+// ── Per-source chat cache (chrome.storage.session) ───────────────────────────
+// Conversations keyed by sourceKey ('page:<url>' / 'yt:<videoId>'), independent
+// of tabs. This is what lets a summary survive navigating away: the tab's state
+// gets replaced by the new page, but returning to the source re-attaches its
+// chat from here.
+
+const CHAT_CACHE_KEY = "chatsBySource";
+const CHAT_CACHE_MAX = 20;
+
+async function getCachedChat(sourceKey) {
+	if (!sourceKey) return null;
+	try {
+		const r = await chrome.storage.session.get([CHAT_CACHE_KEY]);
+		return r?.[CHAT_CACHE_KEY]?.[sourceKey] || null;
+	} catch (_) {
+		return null;
+	}
+}
+
+async function setCachedChat(sourceKey, chat) {
+	if (!sourceKey || !chat) return;
+	try {
+		const r = await chrome.storage.session.get([CHAT_CACHE_KEY]);
+		const all = r?.[CHAT_CACHE_KEY] || {};
+		// Re-insert so object key order doubles as recency; evict the oldest.
+		delete all[sourceKey];
+		all[sourceKey] = chat;
+		const keys = Object.keys(all);
+		while (keys.length > CHAT_CACHE_MAX) delete all[keys.shift()];
+		await chrome.storage.session.set({ [CHAT_CACHE_KEY]: all });
+	} catch (e) {
+		console.error("[Summarizer] chat cache set:", e);
+	}
+}
+
 // ── Active-tab tracking & broadcast ──────────────────────────────────────────
 
 async function getActiveTab() {
@@ -127,10 +162,26 @@ async function getActiveTab() {
 	}
 }
 
+// Attach the live progress of an in-flight chat stream for this state's source,
+// so a panel arriving mid-stream rebuilds the conversation and keeps rendering
+// chunks instead of showing a dead surface.
+function withPending(state) {
+	const entry = state?.sourceKey ? activeChats.get(state.sourceKey) : null;
+	if (!entry) return state;
+	return {
+		...state,
+		pendingChat: {
+			history: entry.request.history,
+			bubbles: entry.request.bubbles || [],
+			accumulated: entry.accumulated,
+		},
+	};
+}
+
 // Notify the open panel of a state. Ignore "no receiver" (panel closed).
 function broadcast(state) {
 	try {
-		chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state }, () => {
+		chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state: withPending(state) }, () => {
 			void chrome.runtime?.lastError;
 		});
 	} catch (_) {
@@ -184,6 +235,7 @@ async function ensureTabState(tab) {
 		const extracted = await extractPage(tabId);
 		let next;
 		if (extracted && extracted.text && extracted.text.trim().length > 20) {
+			const sourceKey = "page:" + url;
 			next = {
 				tabId,
 				url,
@@ -191,8 +243,9 @@ async function ensureTabState(tab) {
 				status: "page_ready",
 				title: extracted.title || tab.title || url,
 				pageText: clampPageText(extracted.text),
-				sourceKey: "page:" + url,
-				chat: null,
+				sourceKey,
+				// Returning to an already-discussed page revives its conversation.
+				chat: await getCachedChat(sourceKey),
 			};
 		} else {
 			next = {
@@ -301,8 +354,13 @@ const YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\/
 // (watch button, side-panel) can abort the actual network call.
 const activeRequests = new Map();
 
-// Single in-flight chat request (panel enforces one-at-a-time via UI state).
-let activeChatController = null;
+// In-flight panel chat/summary streams keyed by sourceKey. Owned here so they
+// outlive the panel surface: switching tabs or navigating away doesn't abort
+// them, and their results are cached by source on completion (see handleChat).
+// Requests without a sourceKey get a throwaway key (stoppable only via a
+// keyless CHAT_STOP, which aborts everything).
+const activeChats = new Map();
+let anonChatSeq = 0;
 
 function cancelRequest(videoId) {
 	const controller = videoId && activeRequests.get(videoId);
@@ -349,9 +407,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 			return true; // async response
 
 		case MSG.CHAT_STOP:
-			if (activeChatController) {
-				activeChatController.abort();
-				activeChatController = null;
+			if (message.sourceKey) {
+				activeChats.get(message.sourceKey)?.controller.abort();
+			} else {
+				for (const entry of activeChats.values()) entry.controller.abort();
 			}
 			sendResponse?.({ ok: true });
 			return false;
@@ -374,6 +433,8 @@ async function handlePublish(payload, sender) {
 		next.chat = null;
 	}
 	if (payload.videoId) next.sourceKey = "yt:" + payload.videoId;
+	// Re-opening a video that was already discussed revives its conversation.
+	if (!next.chat && next.sourceKey) next.chat = await getCachedChat(next.sourceKey);
 	await setTabState(tabId, next);
 	await broadcastIfActive(tabId, next);
 }
@@ -383,7 +444,8 @@ async function handlePublish(payload, sender) {
 async function handleSaveChat(message, sender) {
 	const tabId = message.tabId ?? sender?.tab?.id ?? (await getActiveTab())?.id;
 	if (tabId == null) return;
-	await patchTabState(tabId, { chat: message.chat || null });
+	const next = await patchTabState(tabId, { chat: message.chat || null });
+	if (next?.sourceKey && message.chat) await setCachedChat(next.sourceKey, message.chat);
 }
 
 async function handleStateRequest(sendResponse) {
@@ -393,7 +455,7 @@ async function handleStateRequest(sendResponse) {
 		return;
 	}
 	const state = await getTabState(tab.id);
-	sendResponse({ ok: true, state: state ? { ...state, tabId: tab.id } : null });
+	sendResponse({ ok: true, state: state ? withPending({ ...state, tabId: tab.id }) : null });
 	// Resolve/refresh in the background (extracts page text, etc.) and broadcast.
 	ensureTabState(tab);
 }
@@ -479,6 +541,39 @@ function buildChatContents(history) {
 	}));
 }
 
+// Append the model reply to the request's conversation and persist it: into the
+// per-source cache (survives navigation) and onto the originating tab's state
+// when that tab is still showing the same source.
+async function persistChatResult(request, text) {
+	const { sourceKey, tabId, history, bubbles, context, isSummary } = request;
+	const summaryContext = { ...(context || {}) };
+	if (isSummary) summaryContext.summary = text;
+	const chat = {
+		history: [...(history || []), { role: "model", text }],
+		bubbles: [...(bubbles || []), { role: "model", text }],
+		summaryContext,
+	};
+	if (!sourceKey) return chat;
+	await setCachedChat(sourceKey, chat);
+	if (tabId != null) {
+		const st = await getTabState(tabId);
+		if (st?.sourceKey === sourceKey) await patchTabState(tabId, { chat });
+	}
+	return chat;
+}
+
+// Completion signal for a panel whose original send-callback died with a
+// torn-down surface (tab switch, navigation, panel reopen). A panel that kept
+// its callback ignores this (see finalizeFromBroadcast in popup.js).
+function notifyChatDone(payload) {
+	if (!payload.sourceKey) return;
+	try {
+		chrome.runtime.sendMessage({ type: MSG.CHAT_DONE, ...payload }, () => {
+			void chrome.runtime?.lastError;
+		});
+	} catch (_) {}
+}
+
 async function handleChat(message, sender, sendResponse) {
 	try {
 		const provider = await getProvider();
@@ -487,43 +582,51 @@ async function handleChat(message, sender, sendResponse) {
 			return;
 		}
 
-		const { history } = message;
+		const { history, sourceKey } = message;
 		if (!history?.length) {
 			sendResponse({ ok: false, error: "No message to send." });
 			return;
 		}
 
-		const contents = buildChatContents(history);
 		const body = {
-			contents,
+			contents: buildChatContents(history),
 			generationConfig: CHAT_GENERATION_CONFIG,
 		};
 
-		activeChatController = new AbortController();
-		const signal = activeChatController.signal;
+		const chatKey = sourceKey || "anon:" + ++anonChatSeq;
+		const controller = new AbortController();
+		const entry = { controller, accumulated: "", request: message };
+		activeChats.set(chatKey, entry);
 
 		try {
 			const finalText = await streamWithProvider(provider, {
 				body,
-				signal,
+				signal: controller.signal,
 				onChunk: (accumulated) => {
+					entry.accumulated = accumulated;
 					try {
 						chrome.runtime.sendMessage(
-							{ type: MSG.CHAT_PROGRESS, text: accumulated },
+							{ type: MSG.CHAT_PROGRESS, text: accumulated, sourceKey },
 							() => { void chrome.runtime?.lastError; },
 						);
 					} catch (_) {}
 				},
 			});
+			const chat = await persistChatResult(message, finalText);
+			notifyChatDone({ sourceKey, ok: true, text: finalText, chat });
 			sendResponse({ ok: true, text: finalText });
 		} catch (e) {
-			if (activeChatController?.signal.aborted || e?.name === "AbortError") {
+			if (controller.signal.aborted || e?.name === "AbortError") {
+				// Keep any partial text (mirrors the panel's stop-with-partial UX).
+				const chat = entry.accumulated ? await persistChatResult(message, entry.accumulated) : null;
+				notifyChatDone({ sourceKey, cancelled: true, text: entry.accumulated, chat });
 				sendResponse({ ok: false, cancelled: true });
 				return;
 			}
+			notifyChatDone({ sourceKey, ok: false, error: e?.message || "Chat failed." });
 			sendResponse({ ok: false, error: e?.message || "Chat failed." });
 		} finally {
-			activeChatController = null;
+			if (activeChats.get(chatKey) === entry) activeChats.delete(chatKey);
 		}
 	} catch (e) {
 		sendResponse({ ok: false, error: e?.message || "Unexpected chat error." });

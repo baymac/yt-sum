@@ -7,6 +7,11 @@
 //  TAB FOCUS:     tabs.onActivated / windows.onFocusChanged ──▶ background broadcasts the active tab's cached state
 //  PANEL restore: panel ──SUMMARY_STATE_REQUEST──▶ background ──▶ active tab's stored state
 //  CHAT cache:    panel ──SAVE_CHAT──▶ background stores {history,bubbles,summaryContext} on the tab's state
+//  CHAT stream:   panel ──CHAT_MESSAGE {sourceKey,tabId,bubbles}──▶ background ──CHAT_PROGRESS──▶ panel
+//                 The background owns the stream: it survives tab switches and navigation. On finish it
+//                 caches the chat by sourceKey, patches the tab's state, and broadcasts CHAT_DONE. States
+//                 broadcast mid-stream carry pendingChat {history,bubbles,accumulated} so a returning
+//                 panel can re-attach to the running stream.
 
 export const MSG = {
 	GENERATE_SUMMARY: "GENERATE_SUMMARY",
@@ -19,6 +24,7 @@ export const MSG = {
 	CANCEL_SUMMARY: "CANCEL_SUMMARY",
 	CHAT_MESSAGE: "CHAT_MESSAGE",
 	CHAT_PROGRESS: "CHAT_PROGRESS",
+	CHAT_DONE: "CHAT_DONE",
 	CHAT_STOP: "CHAT_STOP",
 	SAVE_CHAT: "SAVE_CHAT",
 };

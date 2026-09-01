@@ -286,6 +286,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
     CANCEL_SUMMARY: "CANCEL_SUMMARY",
     CHAT_MESSAGE: "CHAT_MESSAGE",
     CHAT_PROGRESS: "CHAT_PROGRESS",
+    CHAT_DONE: "CHAT_DONE",
     CHAT_STOP: "CHAT_STOP",
     SAVE_CHAT: "SAVE_CHAT"
   };
@@ -370,6 +371,31 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       await setAllTabStates(all);
     }
   }
+  var CHAT_CACHE_KEY = "chatsBySource";
+  var CHAT_CACHE_MAX = 20;
+  async function getCachedChat(sourceKey) {
+    if (!sourceKey) return null;
+    try {
+      const r = await chrome.storage.session.get([CHAT_CACHE_KEY]);
+      return r?.[CHAT_CACHE_KEY]?.[sourceKey] || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  async function setCachedChat(sourceKey, chat) {
+    if (!sourceKey || !chat) return;
+    try {
+      const r = await chrome.storage.session.get([CHAT_CACHE_KEY]);
+      const all = r?.[CHAT_CACHE_KEY] || {};
+      delete all[sourceKey];
+      all[sourceKey] = chat;
+      const keys = Object.keys(all);
+      while (keys.length > CHAT_CACHE_MAX) delete all[keys.shift()];
+      await chrome.storage.session.set({ [CHAT_CACHE_KEY]: all });
+    } catch (e) {
+      console.error("[Summarizer] chat cache set:", e);
+    }
+  }
   async function getActiveTab() {
     try {
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -378,9 +404,21 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       return null;
     }
   }
+  function withPending(state) {
+    const entry = state?.sourceKey ? activeChats.get(state.sourceKey) : null;
+    if (!entry) return state;
+    return {
+      ...state,
+      pendingChat: {
+        history: entry.request.history,
+        bubbles: entry.request.bubbles || [],
+        accumulated: entry.accumulated
+      }
+    };
+  }
   function broadcast(state) {
     try {
-      chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state }, () => {
+      chrome.runtime.sendMessage({ type: MSG.SUMMARY_READY, state: withPending(state) }, () => {
         void chrome.runtime?.lastError;
       });
     } catch (_) {
@@ -415,6 +453,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       const extracted = await extractPage(tabId);
       let next;
       if (extracted && extracted.text && extracted.text.trim().length > 20) {
+        const sourceKey = "page:" + url;
         next = {
           tabId,
           url,
@@ -422,8 +461,9 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
           status: "page_ready",
           title: extracted.title || tab.title || url,
           pageText: clampPageText(extracted.text),
-          sourceKey: "page:" + url,
-          chat: null
+          sourceKey,
+          // Returning to an already-discussed page revives its conversation.
+          chat: await getCachedChat(sourceKey)
         };
       } else {
         next = {
@@ -498,7 +538,8 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
   }
   var YOUTUBE_DOMAIN_RE = /^https:\/\/(?:(?:www\.|m\.)?youtube\.com|youtu\.be)\//;
   var activeRequests = /* @__PURE__ */ new Map();
-  var activeChatController = null;
+  var activeChats = /* @__PURE__ */ new Map();
+  var anonChatSeq = 0;
   function cancelRequest(videoId) {
     const controller = videoId && activeRequests.get(videoId);
     if (controller) {
@@ -538,9 +579,10 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         return true;
       // async response
       case MSG.CHAT_STOP:
-        if (activeChatController) {
-          activeChatController.abort();
-          activeChatController = null;
+        if (message.sourceKey) {
+          activeChats.get(message.sourceKey)?.controller.abort();
+        } else {
+          for (const entry of activeChats.values()) entry.controller.abort();
         }
         sendResponse?.({ ok: true });
         return false;
@@ -557,13 +599,15 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       next.chat = null;
     }
     if (payload.videoId) next.sourceKey = "yt:" + payload.videoId;
+    if (!next.chat && next.sourceKey) next.chat = await getCachedChat(next.sourceKey);
     await setTabState(tabId, next);
     await broadcastIfActive(tabId, next);
   }
   async function handleSaveChat(message, sender) {
     const tabId = message.tabId ?? sender?.tab?.id ?? (await getActiveTab())?.id;
     if (tabId == null) return;
-    await patchTabState(tabId, { chat: message.chat || null });
+    const next = await patchTabState(tabId, { chat: message.chat || null });
+    if (next?.sourceKey && message.chat) await setCachedChat(next.sourceKey, message.chat);
   }
   async function handleStateRequest(sendResponse) {
     const tab = await getActiveTab();
@@ -572,7 +616,7 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       return;
     }
     const state = await getTabState(tab.id);
-    sendResponse({ ok: true, state: state ? { ...state, tabId: tab.id } : null });
+    sendResponse({ ok: true, state: state ? withPending({ ...state, tabId: tab.id }) : null });
     ensureTabState(tab);
   }
   async function handleGenerate(message, sender, sendResponse) {
@@ -646,6 +690,32 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
       parts: [{ text: msg.text }]
     }));
   }
+  async function persistChatResult(request, text) {
+    const { sourceKey, tabId, history, bubbles, context, isSummary } = request;
+    const summaryContext = { ...context || {} };
+    if (isSummary) summaryContext.summary = text;
+    const chat = {
+      history: [...history || [], { role: "model", text }],
+      bubbles: [...bubbles || [], { role: "model", text }],
+      summaryContext
+    };
+    if (!sourceKey) return chat;
+    await setCachedChat(sourceKey, chat);
+    if (tabId != null) {
+      const st = await getTabState(tabId);
+      if (st?.sourceKey === sourceKey) await patchTabState(tabId, { chat });
+    }
+    return chat;
+  }
+  function notifyChatDone(payload) {
+    if (!payload.sourceKey) return;
+    try {
+      chrome.runtime.sendMessage({ type: MSG.CHAT_DONE, ...payload }, () => {
+        void chrome.runtime?.lastError;
+      });
+    } catch (_) {
+    }
+  }
   async function handleChat(message, sender, sendResponse) {
     try {
       const provider = await getProvider();
@@ -653,26 +723,28 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
         sendResponse({ ok: false, error: missingKeyError(provider) });
         return;
       }
-      const { history } = message;
+      const { history, sourceKey } = message;
       if (!history?.length) {
         sendResponse({ ok: false, error: "No message to send." });
         return;
       }
-      const contents = buildChatContents(history);
       const body = {
-        contents,
+        contents: buildChatContents(history),
         generationConfig: CHAT_GENERATION_CONFIG
       };
-      activeChatController = new AbortController();
-      const signal = activeChatController.signal;
+      const chatKey = sourceKey || "anon:" + ++anonChatSeq;
+      const controller = new AbortController();
+      const entry = { controller, accumulated: "", request: message };
+      activeChats.set(chatKey, entry);
       try {
         const finalText = await streamWithProvider(provider, {
           body,
-          signal,
+          signal: controller.signal,
           onChunk: (accumulated) => {
+            entry.accumulated = accumulated;
             try {
               chrome.runtime.sendMessage(
-                { type: MSG.CHAT_PROGRESS, text: accumulated },
+                { type: MSG.CHAT_PROGRESS, text: accumulated, sourceKey },
                 () => {
                   void chrome.runtime?.lastError;
                 }
@@ -681,15 +753,20 @@ The video title is: ${title}` : SUMMARY_INSTRUCTION;
             }
           }
         });
+        const chat = await persistChatResult(message, finalText);
+        notifyChatDone({ sourceKey, ok: true, text: finalText, chat });
         sendResponse({ ok: true, text: finalText });
       } catch (e) {
-        if (activeChatController?.signal.aborted || e?.name === "AbortError") {
+        if (controller.signal.aborted || e?.name === "AbortError") {
+          const chat = entry.accumulated ? await persistChatResult(message, entry.accumulated) : null;
+          notifyChatDone({ sourceKey, cancelled: true, text: entry.accumulated, chat });
           sendResponse({ ok: false, cancelled: true });
           return;
         }
+        notifyChatDone({ sourceKey, ok: false, error: e?.message || "Chat failed." });
         sendResponse({ ok: false, error: e?.message || "Chat failed." });
       } finally {
-        activeChatController = null;
+        if (activeChats.get(chatKey) === entry) activeChats.delete(chatKey);
       }
     } catch (e) {
       sendResponse({ ok: false, error: e?.message || "Unexpected chat error." });

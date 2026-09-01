@@ -154,10 +154,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 	// wipe an active/summarized chat (which would make Summarize vanish after click).
 	let chatSourceKey = null;
 
+	// Resets the chat surface. Deliberately does NOT stop an in-flight stream:
+	// the background owns it and caches the result by source, so navigating away
+	// loses nothing — the summary is waiting when the user comes back.
 	function clearChat() {
-		if (chatStreaming) {
-			chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => { void chrome.runtime?.lastError; });
-		}
 		chatHistory = [];
 		chatStreaming = false;
 		pendingChatText = "";
@@ -460,13 +460,21 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 		try {
 			chrome.runtime.sendMessage(
-				{ type: MSG.CHAT_MESSAGE, history: outgoingHistory, context },
+				{
+					type: MSG.CHAT_MESSAGE,
+					history: outgoingHistory,
+					context,
+					sourceKey: chatSourceKey,
+					tabId: currentTabId,
+					bubbles: collectBubbles(),
+				},
 				(resp) => {
 					void chrome.runtime?.lastError;
+					// The surface moved on (tab switch / navigation rebuilt it) or
+					// CHAT_DONE already finalized this turn — the background persisted
+					// the result, so applying it here would corrupt another conversation.
+					if (!chatStreaming || currentTabId !== sendTabId || !modelBubble.isConnected) return;
 					setChatSendState(false);
-					// The user switched tabs while awaiting the reply — drop it so we
-					// never write one tab's answer into another tab's cached chat.
-					if (currentTabId !== sendTabId) return;
 
 					if (resp?.cancelled) {
 						// Keep partial text if the user stopped mid-stream.
@@ -516,12 +524,21 @@ document.addEventListener("DOMContentLoaded", async () => {
 		pendingChatText = "";
 		const sendTabId = currentTabId;
 		chrome.runtime.sendMessage(
-			{ type: MSG.CHAT_MESSAGE, history: outgoingHistory, context: summaryContext },
+			{
+				type: MSG.CHAT_MESSAGE,
+				history: outgoingHistory,
+				context: summaryContext,
+				sourceKey: chatSourceKey,
+				tabId: currentTabId,
+				bubbles: collectBubbles(),
+				isSummary: true,
+			},
 			(resp) => {
 				void chrome.runtime?.lastError;
+				// Dropped when the surface moved on or CHAT_DONE finalized first
+				// (see sendChatMessage).
+				if (!chatStreaming || currentTabId !== sendTabId || !modelBubble.isConnected) return;
 				setChatSendState(false);
-				// Dropped if the user switched tabs mid-request (see sendChatMessage).
-				if (currentTabId !== sendTabId) return;
 				if (resp?.cancelled) {
 					if (pendingChatText) {
 						chatHistory.push({ role: "user", text: prompt }, { role: "model", text: pendingChatText });
@@ -557,7 +574,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 	els.chatSendBtn.addEventListener("click", () => {
 		if (chatStreaming) {
-			chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => { void chrome.runtime?.lastError; });
+			chrome.runtime.sendMessage({ type: MSG.CHAT_STOP, sourceKey: chatSourceKey }, () => { void chrome.runtime?.lastError; });
 		} else {
 			sendChatMessage();
 		}
@@ -569,13 +586,40 @@ document.addEventListener("DOMContentLoaded", async () => {
 	chrome.runtime.onMessage.addListener((message) => {
 		if (message?.type === MSG.SUMMARY_READY) applyState(message.state);
 
-		if (message?.type === MSG.CHAT_PROGRESS && chatStreaming) {
+		if (
+			message?.type === MSG.CHAT_PROGRESS &&
+			chatStreaming &&
+			(!message.sourceKey || message.sourceKey === chatSourceKey)
+		) {
 			pendingChatText = message.text;
 			const bubbles = els.chatMessages.querySelectorAll(".chat-bubble-model");
 			const last = bubbles[bubbles.length - 1];
 			if (last && last._content) fillModel(last, message.text);
 		}
+
+		if (message?.type === MSG.CHAT_DONE) finalizeFromBroadcast(message);
 	});
+
+	// Completion signal for a stream whose send-callback belongs to a torn-down
+	// surface (the panel was rebuilt or reopened mid-stream). When the original
+	// callback is still alive it finalizes first and this no-ops via chatStreaming.
+	function finalizeFromBroadcast(message) {
+		if (!chatStreaming || !message.sourceKey || message.sourceKey !== chatSourceKey) return;
+		setChatSendState(false);
+		const bubbles = els.chatMessages.querySelectorAll(".chat-bubble-model");
+		const last = bubbles[bubbles.length - 1];
+		if (message.chat) {
+			if (Array.isArray(message.chat.history)) chatHistory = [...message.chat.history];
+			if (message.chat.summaryContext) summaryContext = message.chat.summaryContext;
+		}
+		if (message.text) {
+			if (last) fillModel(last, message.text);
+		} else if (message.cancelled) {
+			if (last) last.remove();
+		} else if (last) {
+			fillModel(last, "", `<span role="alert" style="color:#c62828">${escapeHtml(message.error || "Failed to get response.")}</span>`);
+		}
+	}
 
 	// ── Restore last state on open ─────────────────────────────────────────────
 	chrome.runtime.sendMessage({ type: MSG.SUMMARY_STATE_REQUEST }, (resp) => {
@@ -616,23 +660,35 @@ document.addEventListener("DOMContentLoaded", async () => {
 		);
 	}
 
+	// The chat cache key a state addresses, mirroring the background's sourceKey.
+	function stateSource(state) {
+		if (state.sourceKey) return state.sourceKey;
+		if (state.videoId) return "yt:" + state.videoId;
+		if (state.kind === "page" && state.url) return "page:" + state.url;
+		return null;
+	}
+
 	// Entry point for every broadcast/restore. A state stamped with a *different*
 	// tab id means the user switched tabs → rebuild that tab's surface (chat
-	// included). Same tab (or an untagged legacy state) → normal live render.
+	// included). The same applies to a *different source* in the same tab (the
+	// user navigated, e.g. back to an already-summarized page): rebuild so any
+	// cached or still-streaming chat it carries is re-attached. Same source →
+	// normal live render.
 	function applyState(state) {
 		if (!state) return;
 		const incomingTab = state.tabId != null ? state.tabId : null;
 		const isSwitch = incomingTab != null && incomingTab !== currentTabId;
 		if (incomingTab != null) currentTabId = incomingTab;
-		if (isSwitch) restoreTabState(state);
+		const source = stateSource(state);
+		const differentSource = source != null && source !== chatSourceKey;
+		const hasChat = !!(state.pendingChat || (state.chat && state.chat.bubbles && state.chat.bubbles.length));
+		if (isSwitch || (differentSource && (chatSourceKey != null || hasChat))) restoreTabState(state);
 		else renderState(state);
 	}
 
 	function restoreTabState(state) {
-		// Tear down the previous tab's chat surface before rebuilding this one's.
-		if (chatStreaming) {
-			chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => { void chrome.runtime?.lastError; });
-		}
+		// Tear down the previous surface. An in-flight stream keeps running in the
+		// background; if it belongs to this state's source it's re-attached below.
 		chatHistory = [];
 		chatStreaming = false;
 		pendingChatText = "";
@@ -641,8 +697,25 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 		renderState(state);
 
+		const pending = state.pendingChat;
 		const chat = state.chat;
-		if (chat && Array.isArray(chat.bubbles) && chat.bubbles.length) {
+		if (pending && Array.isArray(pending.bubbles)) {
+			// A stream for this source is still running: rebuild the conversation up
+			// to the in-flight turn, re-attach a live bubble (CHAT_PROGRESS keeps
+			// filling it; CHAT_DONE finalizes), and flip the button back to Stop.
+			chatHistory = Array.isArray(pending.history) ? [...pending.history] : [];
+			if (chat && chat.summaryContext) summaryContext = chat.summaryContext;
+			restoreBubbles(pending.bubbles);
+			const bubble = appendChatMessage("model", "");
+			if (pending.accumulated) fillModel(bubble, pending.accumulated);
+			pendingChatText = pending.accumulated || "";
+			showChat();
+			els.chatInput.disabled = false;
+			els.viewTop.setAttribute("hidden", "");
+			document.body.classList.add("chat-active");
+			els.summarizeForChatBtn.setAttribute("hidden", "");
+			setChatSendState(true);
+		} else if (chat && Array.isArray(chat.bubbles) && chat.bubbles.length) {
 			chatHistory = Array.isArray(chat.history) ? [...chat.history] : [];
 			if (chat.summaryContext) summaryContext = chat.summaryContext;
 			restoreBubbles(chat.bubbles);

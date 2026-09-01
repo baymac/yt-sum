@@ -151,6 +151,7 @@
     CANCEL_SUMMARY: "CANCEL_SUMMARY",
     CHAT_MESSAGE: "CHAT_MESSAGE",
     CHAT_PROGRESS: "CHAT_PROGRESS",
+    CHAT_DONE: "CHAT_DONE",
     CHAT_STOP: "CHAT_STOP",
     SAVE_CHAT: "SAVE_CHAT"
   };
@@ -352,11 +353,6 @@ ${clampPageText(pageText)}`;
     let currentTabId = null;
     let chatSourceKey = null;
     function clearChat() {
-      if (chatStreaming) {
-        chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => {
-          void chrome.runtime?.lastError;
-        });
-      }
       chatHistory = [];
       chatStreaming = false;
       pendingChatText = "";
@@ -608,11 +604,18 @@ ${transcriptForSummarize}`;
       const sendTabId = currentTabId;
       try {
         chrome.runtime.sendMessage(
-          { type: MSG.CHAT_MESSAGE, history: outgoingHistory, context },
+          {
+            type: MSG.CHAT_MESSAGE,
+            history: outgoingHistory,
+            context,
+            sourceKey: chatSourceKey,
+            tabId: currentTabId,
+            bubbles: collectBubbles()
+          },
           (resp) => {
             void chrome.runtime?.lastError;
+            if (!chatStreaming || currentTabId !== sendTabId || !modelBubble.isConnected) return;
             setChatSendState(false);
-            if (currentTabId !== sendTabId) return;
             if (resp?.cancelled) {
               if (pendingChatText) {
                 chatHistory.push({ role: "user", text }, { role: "model", text: pendingChatText });
@@ -653,11 +656,19 @@ ${transcriptForSummarize}`;
       pendingChatText = "";
       const sendTabId = currentTabId;
       chrome.runtime.sendMessage(
-        { type: MSG.CHAT_MESSAGE, history: outgoingHistory, context: summaryContext },
+        {
+          type: MSG.CHAT_MESSAGE,
+          history: outgoingHistory,
+          context: summaryContext,
+          sourceKey: chatSourceKey,
+          tabId: currentTabId,
+          bubbles: collectBubbles(),
+          isSummary: true
+        },
         (resp) => {
           void chrome.runtime?.lastError;
+          if (!chatStreaming || currentTabId !== sendTabId || !modelBubble.isConnected) return;
           setChatSendState(false);
-          if (currentTabId !== sendTabId) return;
           if (resp?.cancelled) {
             if (pendingChatText) {
               chatHistory.push({ role: "user", text: prompt }, { role: "model", text: pendingChatText });
@@ -689,7 +700,7 @@ ${transcriptForSummarize}`;
     });
     els.chatSendBtn.addEventListener("click", () => {
       if (chatStreaming) {
-        chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => {
+        chrome.runtime.sendMessage({ type: MSG.CHAT_STOP, sourceKey: chatSourceKey }, () => {
           void chrome.runtime?.lastError;
         });
       } else {
@@ -699,13 +710,31 @@ ${transcriptForSummarize}`;
     els.summarizeForChatBtn.addEventListener("click", startSummarize);
     chrome.runtime.onMessage.addListener((message) => {
       if (message?.type === MSG.SUMMARY_READY) applyState(message.state);
-      if (message?.type === MSG.CHAT_PROGRESS && chatStreaming) {
+      if (message?.type === MSG.CHAT_PROGRESS && chatStreaming && (!message.sourceKey || message.sourceKey === chatSourceKey)) {
         pendingChatText = message.text;
         const bubbles = els.chatMessages.querySelectorAll(".chat-bubble-model");
         const last = bubbles[bubbles.length - 1];
         if (last && last._content) fillModel(last, message.text);
       }
+      if (message?.type === MSG.CHAT_DONE) finalizeFromBroadcast(message);
     });
+    function finalizeFromBroadcast(message) {
+      if (!chatStreaming || !message.sourceKey || message.sourceKey !== chatSourceKey) return;
+      setChatSendState(false);
+      const bubbles = els.chatMessages.querySelectorAll(".chat-bubble-model");
+      const last = bubbles[bubbles.length - 1];
+      if (message.chat) {
+        if (Array.isArray(message.chat.history)) chatHistory = [...message.chat.history];
+        if (message.chat.summaryContext) summaryContext = message.chat.summaryContext;
+      }
+      if (message.text) {
+        if (last) fillModel(last, message.text);
+      } else if (message.cancelled) {
+        if (last) last.remove();
+      } else if (last) {
+        fillModel(last, "", `<span role="alert" style="color:#c62828">${escapeHtml2(message.error || "Failed to get response.")}</span>`);
+      }
+    }
     chrome.runtime.sendMessage({ type: MSG.SUMMARY_STATE_REQUEST }, (resp) => {
       void chrome.runtime?.lastError;
       if (resp?.state) applyState(resp.state);
@@ -739,28 +768,46 @@ ${transcriptForSummarize}`;
         }
       );
     }
+    function stateSource(state) {
+      if (state.sourceKey) return state.sourceKey;
+      if (state.videoId) return "yt:" + state.videoId;
+      if (state.kind === "page" && state.url) return "page:" + state.url;
+      return null;
+    }
     function applyState(state) {
       if (!state) return;
       const incomingTab = state.tabId != null ? state.tabId : null;
       const isSwitch = incomingTab != null && incomingTab !== currentTabId;
       if (incomingTab != null) currentTabId = incomingTab;
-      if (isSwitch) restoreTabState(state);
+      const source = stateSource(state);
+      const differentSource = source != null && source !== chatSourceKey;
+      const hasChat = !!(state.pendingChat || state.chat && state.chat.bubbles && state.chat.bubbles.length);
+      if (isSwitch || differentSource && (chatSourceKey != null || hasChat)) restoreTabState(state);
       else renderState(state);
     }
     function restoreTabState(state) {
-      if (chatStreaming) {
-        chrome.runtime.sendMessage({ type: MSG.CHAT_STOP }, () => {
-          void chrome.runtime?.lastError;
-        });
-      }
       chatHistory = [];
       chatStreaming = false;
       pendingChatText = "";
       els.chatMessages.innerHTML = "";
       setChatSendState(false);
       renderState(state);
+      const pending = state.pendingChat;
       const chat = state.chat;
-      if (chat && Array.isArray(chat.bubbles) && chat.bubbles.length) {
+      if (pending && Array.isArray(pending.bubbles)) {
+        chatHistory = Array.isArray(pending.history) ? [...pending.history] : [];
+        if (chat && chat.summaryContext) summaryContext = chat.summaryContext;
+        restoreBubbles(pending.bubbles);
+        const bubble = appendChatMessage("model", "");
+        if (pending.accumulated) fillModel(bubble, pending.accumulated);
+        pendingChatText = pending.accumulated || "";
+        showChat();
+        els.chatInput.disabled = false;
+        els.viewTop.setAttribute("hidden", "");
+        document.body.classList.add("chat-active");
+        els.summarizeForChatBtn.setAttribute("hidden", "");
+        setChatSendState(true);
+      } else if (chat && Array.isArray(chat.bubbles) && chat.bubbles.length) {
         chatHistory = Array.isArray(chat.history) ? [...chat.history] : [];
         if (chat.summaryContext) summaryContext = chat.summaryContext;
         restoreBubbles(chat.bubbles);
